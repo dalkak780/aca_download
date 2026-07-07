@@ -1,0 +1,30 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ArcaDownloader.MewUI", "src\ArcaDownloader\ArcaDownloader.MewUI\ArcaDownloader.MewUI.csproj", "{85F7E766-5F70-4A35-A249-5853F8C0F122}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ArcaDownloader.Core", "src\ArcaDownloader.Core\ArcaDownloader.Core.csproj", "{909D7515-683D-467F-941E-61E486B0FC89}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ArcaDownloader.Tests", "tests\ArcaDownloader.Tests\ArcaDownloader.Tests.csproj", "{43D4CB52-C2D9-4B4B-A42F-961FF611BF7E}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{85F7E766-5F70-4A35-A249-5853F8C0F122}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{85F7E766-5F70-4A35-A249-5853F8C0F122}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{85F7E766-5F70-4A35-A249-5853F8C0F122}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{85F7E766-5F70-4A35-A249-5853F8C0F122}.Release|Any CPU.Build.0 = Release|Any CPU
+		{909D7515-683D-467F-941E-61E486B0FC89}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{909D7515-683D-467F-941E-61E486B0FC89}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{909D7515-683D-467F-941E-61E486B0FC89}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{909D7515-683D-467F-941E-61E486B0FC89}.Release|Any CPU.Build.0 = Release|Any CPU
+		{43D4CB52-C2D9-4B4B-A42F-961FF611BF7E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{43D4CB52-C2D9-4B4B-A42F-961FF611BF7E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{43D4CB52-C2D9-4B4B-A42F-961FF611BF7E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{43D4CB52-C2D9-4B4B-A42F-961FF611BF7E}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

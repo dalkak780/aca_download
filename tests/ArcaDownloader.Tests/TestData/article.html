@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta property="og:title" content="테스트 게시글">
+  <meta name="author" content="meta-author">
+  <title>fallback</title>
+</head>
+<body>
+  <div class="article-header"><span class="user">작성자</span></div>
+  <time datetime="2026-07-07T12:00:00+09:00">ignored</time>
+  <section id="article-content">
+    <script>bad()</script>
+    <p>본문</p>
+    <img data-originalurl="//ac-p1.namu.la/abc/test.jpg?foo=1" width="1600">
+    <img data-src="/relative/preview.png">
+    <div class="comments">댓글</div>
+  </section>
+</body>
+</html>
+

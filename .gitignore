@@ -1,0 +1,14 @@
+bin/
+obj/
+dist/
+build/
+publish/
+.arca_tmp/
+.setup_done
+msedgedriver.exe
+settings.ini
+*.tar
+*.tar.gz
+*.user
+*.suo
+*.zip
