@@ -10,7 +10,7 @@ public static partial class TextHelpers
     public static string SanitizeFileName(string name, int maxLength = 80)
     {
         var cleaned = InvalidFileNameChars().Replace(name, " ").Trim();
-        cleaned = Whitespace().Replace(cleaned, "-");
+        cleaned = Whitespace().Replace(cleaned, " ");
         if (cleaned.Length > maxLength)
         {
             cleaned = cleaned[..maxLength];
@@ -53,4 +53,3 @@ public static partial class TextHelpers
     [GeneratedRegex(@"\s+")]
     private static partial Regex Whitespace();
 }
-
