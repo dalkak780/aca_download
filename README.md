@@ -57,6 +57,8 @@ Native AOT publish:
 dotnet publish .\src\ArcaDownloader.MewUI\ArcaDownloader.MewUI.csproj -c Release -r win-x64 -o .\publish
 ```
 
+GitHub Actions release workflow는 수동 실행 또는 `v*` 태그 push로 `win-x64`, `win-arm64` Native AOT ZIP을 생성합니다.
+
 간편 빌드 스크립트:
 
 ```powershell

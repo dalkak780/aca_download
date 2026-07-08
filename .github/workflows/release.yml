@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Tag to publish as a GitHub Release. Leave empty to build artifacts only."
+        required: false
+        type: string
+      prerelease:
+        description: "Mark the GitHub Release as a prerelease."
+        required: false
+        default: false
+        type: boolean
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  SOLUTION_PATH: ArcaDownloader.sln
+  PROJECT_PATH: src/ArcaDownloader.MewUI/ArcaDownloader.MewUI.csproj
+
+jobs:
+  build:
+    name: Build ${{ matrix.rid }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rid:
+          - win-x64
+          - win-arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore $env:SOLUTION_PATH -r ${{ matrix.rid }}
+
+      - name: Test
+        run: dotnet test $env:SOLUTION_PATH -c Release --no-restore
+
+      - name: Publish Native AOT
+        run: >
+          dotnet publish $env:PROJECT_PATH
+          -c Release
+          -r ${{ matrix.rid }}
+          -o artifacts/publish/${{ matrix.rid }}
+          --no-restore
+          --self-contained true
+          -p:PublishAot=true
+
+      - name: Pack artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          $zip = "artifacts/ArcaDownloader.MewUI-${{ matrix.rid }}.zip"
+          if (Test-Path $zip) {
+            Remove-Item $zip -Force
+          }
+          Compress-Archive -Path "artifacts/publish/${{ matrix.rid }}/*" -DestinationPath $zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArcaDownloader.MewUI-${{ matrix.rid }}
+          path: artifacts/ArcaDownloader.MewUI-${{ matrix.rid }}.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    runs-on: windows-latest
+    needs: build
+    if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.tag_name != '')
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG_NAME: ${{ inputs.tag_name }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          $tag = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { $env:INPUT_TAG_NAME }
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            throw "A tag is required to publish a GitHub Release."
+          }
+
+          $assets = Get-ChildItem -Path release-assets -Filter *.zip | ForEach-Object { $_.FullName }
+          if ($assets.Count -eq 0) {
+            throw "No release assets found."
+          }
+
+          $releaseArgs = @("release", "create", $tag) + $assets + @("--title", $tag, "--notes", "Native AOT Windows builds.")
+          if ($env:INPUT_PRERELEASE -eq "true") {
+            $releaseArgs += "--prerelease"
+          }
+
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --clobber
+          } else {
+            gh @releaseArgs
+          }
