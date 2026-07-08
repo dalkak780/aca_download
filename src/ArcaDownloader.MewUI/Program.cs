@@ -62,12 +62,13 @@ internal sealed class MainWindow : Window
     private readonly ObservableValue<string> _imageEtaText = new("");
 
     private CookieContainer _cookies = new();
+    private string _cookieHeader = "";
+    private string _outputDirectory = "";
     private CancellationTokenSource? _downloadCts;
     private StackPanel _urlRows = null!;
-    private TextBox _cookieTextBox = null!;
-    private TextBox _outputDirectoryTextBox = null!;
     private MultiLineTextBox _logTextBox = null!;
     private CheckBox _originalImageCheckBox = null!;
+    private Button _settingsButton = null!;
     private Button _startButton = null!;
     private Button _pauseButton = null!;
     private Button _stopButton = null!;
@@ -77,15 +78,13 @@ internal sealed class MainWindow : Window
         Title = "아카라이브 다운로더";
         Padding = new Thickness(0);
         StartupLocation = WindowStartupLocation.CenterScreen;
-        WindowSize = WindowSize.Resizable(780, 850, 640, 600);
+        WindowSize = WindowSize.Resizable(780, 760, 640, 560);
         Content = BuildContent();
         Loaded += async () => await InitializeSessionAsync();
     }
 
     private Element BuildContent()
     {
-        _outputDirectoryTextBox = new TextBox();
-
         _urlRows = new StackPanel().Vertical().Spacing(6);
         AddUrlRow("");
 
@@ -99,8 +98,6 @@ internal sealed class MainWindow : Window
                     .Children(
                         Header(),
                         Section("URL 목록", UrlSection()),
-                        Section("아카라이브 로그인 (선택 - HTTP 451 차단 우회)", LoginSection()),
-                        Section("저장 위치", OutputSection()),
                         Section("다운로드 설정", SettingsSection()),
                         ActionButtons(),
                         ProgressSection(),
@@ -109,16 +106,25 @@ internal sealed class MainWindow : Window
 
     private UIElement Header()
     {
-        return new StackPanel()
-            .Horizontal()
+        _settingsButton = new Button()
+            .DockRight()
+            .Content("설정")
+            .OnClick(async () => await ShowSettingsAsync());
+
+        return new DockPanel()
             .Spacing(10)
             .Children(
-                new Image().Source(ImageSource.FromBytes(ReadEmbeddedResource("arca_icon.png"))).Size(36, 36),
+                _settingsButton,
                 new StackPanel()
-                    .Vertical()
+                    .Horizontal()
+                    .Spacing(10)
                     .Children(
-                        new TextBlock().Text("아카라이브 다운로더").FontSize(22).Bold(),
-                        new TextBlock().Text("게시글 URL을 입력하면 이미지 포함 ZIP으로 저장합니다").FontSize(12)));
+                        new Image().Source(ImageSource.FromBytes(ReadEmbeddedResource("arca_icon.png"))).Size(36, 36),
+                        new StackPanel()
+                            .Vertical()
+                            .Children(
+                                new TextBlock().Text("아카라이브 다운로더").FontSize(22).Bold(),
+                                new TextBlock().Text("게시글 URL을 입력하면 이미지 포함 ZIP으로 저장합니다").FontSize(12))));
     }
 
     private UIElement Section(string title, UIElement content)
@@ -175,47 +181,6 @@ internal sealed class MainWindow : Window
 
         _urlBoxes.Add(box);
         _urlRows.Add(row);
-    }
-
-    private UIElement LoginSection()
-    {
-        _cookieTextBox = new TextBox().Placeholder("수동 쿠키 문자열: key=value; key2=value2");
-
-        return new StackPanel()
-            .Vertical()
-            .Spacing(8)
-            .Children(
-                new DockPanel()
-                    .Spacing(8)
-                    .Children(
-                        new Button().Content("아카라이브 로그인").OnClick(async () => await LoginAsync()),
-                        new Button().Content("쿠키 저장").OnClick(async () => await SaveCookieAsync()),
-                        new Button().Content("삭제").OnClick(async () => await ClearCookieAsync()),
-                        new TextBlock().BindText(_loginStatus).DockLeft().Width(150).CenterVertical().Bold()),
-                _cookieTextBox,
-                new TextBlock()
-                    .FontSize(11)
-                    .Text("쿠키는 LocalAppData\\ArcaDownloader\\cookies.json에 저장되며, invalid할 때만 다시 로그인하면 됩니다."));
-    }
-
-    private UIElement OutputSection()
-    {
-        return new DockPanel()
-            .Spacing(8)
-            .Children(
-                new Button()
-                    .DockRight()
-                    .Content("폴더 선택")
-                    .OnClick(() =>
-                    {
-                        var folder = FileDialog.SelectFolder(new FolderDialogOptions { Owner = Handle });
-                        if (!string.IsNullOrWhiteSpace(folder))
-                        {
-                            _outputDirectoryTextBox.Text = folder;
-                            _ = SaveSettingsAsync();
-                        }
-                    }),
-                _outputDirectoryTextBox);
     }
 
     private UIElement SettingsSection()
@@ -283,7 +248,7 @@ internal sealed class MainWindow : Window
     private async Task LoadSettingsAsync()
     {
         var settings = await _settingsStore.LoadAsync();
-        _outputDirectoryTextBox.Text = string.IsNullOrWhiteSpace(settings.OutputDirectory)
+        _outputDirectory = string.IsNullOrWhiteSpace(settings.OutputDirectory)
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads")
             : settings.OutputDirectory;
         await SaveSettingsAsync();
@@ -301,7 +266,7 @@ internal sealed class MainWindow : Window
 
         _loginStatus.Value = "로그인 필요";
         AppendLog("[*] 저장된 세션이 없거나 만료되어 로그인 창을 엽니다.");
-        await LoginAsync();
+        await LoginAsync(this);
     }
 
     private async Task<bool> HasValidSessionAsync()
@@ -324,9 +289,31 @@ internal sealed class MainWindow : Window
         }
     }
 
-    private async Task SaveCookieAsync()
+    private async Task ShowSettingsAsync()
     {
-        await _cookieJar.SaveFromHeaderAsync(_cookieTextBox.Text ?? "");
+        var settingsWindow = new SettingsWindow(
+            _cookieHeader,
+            _outputDirectory,
+            _loginStatus,
+            LoginAsync,
+            SaveCookieAsync,
+            ClearCookieAsync,
+            async outputDirectory =>
+            {
+                _outputDirectory = outputDirectory;
+                await SaveSettingsAsync();
+            });
+
+        await settingsWindow.ShowDialogAsync(this);
+        _cookieHeader = settingsWindow.CookieHeader;
+        _outputDirectory = settingsWindow.OutputDirectory;
+        await SaveSettingsAsync();
+    }
+
+    private async Task SaveCookieAsync(string cookieHeader)
+    {
+        _cookieHeader = cookieHeader;
+        await _cookieJar.SaveFromHeaderAsync(_cookieHeader);
         await LoadCookiesAsync();
         AppendLog("[*] 수동 쿠키를 저장했습니다.");
     }
@@ -338,7 +325,7 @@ internal sealed class MainWindow : Window
             File.Delete(_cookieJar.Path);
         }
 
-        _cookieTextBox.Text = "";
+        _cookieHeader = "";
         await LoadCookiesAsync();
         AppendLog("[*] 저장된 쿠키를 삭제했습니다.");
     }
@@ -347,7 +334,7 @@ internal sealed class MainWindow : Window
     {
         try
         {
-            await _settingsStore.SaveAsync(new AppSettings(_outputDirectoryTextBox.Text));
+            await _settingsStore.SaveAsync(new AppSettings(_outputDirectory));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -355,13 +342,13 @@ internal sealed class MainWindow : Window
         }
     }
 
-    private async Task LoginAsync()
+    private async Task LoginAsync(Window owner)
     {
         _loginStatus.Value = "로그인 중...";
         try
         {
             var loginWindow = new LoginWindow();
-            await loginWindow.ShowDialogAsync(this);
+            await loginWindow.ShowDialogAsync(owner);
             if (loginWindow.Cookies.Count > 0)
             {
                 await _cookieJar.SaveAsync(loginWindow.Cookies);
@@ -402,8 +389,8 @@ internal sealed class MainWindow : Window
             {
                 var request = new DownloadRequest(
                     url,
-                    _outputDirectoryTextBox.Text ?? "",
-                    _cookieTextBox.Text ?? "",
+                    _outputDirectory,
+                    _cookieHeader,
                     _originalImageCheckBox.IsChecked == true);
 
                 var result = await _downloadService.DownloadAsync(
@@ -469,6 +456,7 @@ internal sealed class MainWindow : Window
 
     private void SetDownloading(bool downloading)
     {
+        _settingsButton.IsEnabled = !downloading;
         _startButton.IsEnabled = !downloading;
         _pauseButton.IsEnabled = downloading;
         _stopButton.IsEnabled = downloading;
@@ -524,6 +512,121 @@ internal sealed class MainWindow : Window
         using var memory = new MemoryStream();
         stream.CopyTo(memory);
         return memory.ToArray();
+    }
+}
+
+internal sealed class SettingsWindow : Window
+{
+    private readonly TextBox _cookieTextBox;
+    private readonly TextBox _outputDirectoryTextBox;
+
+    public SettingsWindow(
+        string cookieHeader,
+        string outputDirectory,
+        ObservableValue<string> loginStatus,
+        Func<Window, Task> loginAsync,
+        Func<string, Task> saveCookieAsync,
+        Func<Task> clearCookieAsync,
+        Func<string, Task> saveOutputDirectoryAsync)
+    {
+        Title = "설정";
+        StartupLocation = WindowStartupLocation.CenterOwner;
+        WindowSize = WindowSize.Fixed(620, 430);
+
+        _cookieTextBox = new TextBox
+        {
+            Text = cookieHeader
+        }.Placeholder("수동 쿠키 문자열: key=value; key2=value2");
+        _outputDirectoryTextBox = new TextBox
+        {
+            Text = outputDirectory
+        };
+
+        Content = new StackPanel()
+            .Vertical()
+            .Spacing(16)
+            .Padding(24)
+            .Children(
+                Section("저장 위치", OutputSection(saveOutputDirectoryAsync)),
+                Section("계정 관리", AccountSection(loginStatus, loginAsync, saveCookieAsync, clearCookieAsync)),
+                new DockPanel()
+                    .Children(
+                        new Button()
+                            .DockRight()
+                            .Content("닫기")
+                            .OnClick(Close)));
+    }
+
+    public string CookieHeader => _cookieTextBox.Text ?? "";
+
+    public string OutputDirectory => _outputDirectoryTextBox.Text ?? "";
+
+    private UIElement OutputSection(Func<string, Task> saveOutputDirectoryAsync)
+    {
+        return new StackPanel()
+            .Vertical()
+            .Spacing(8)
+            .Children(
+                new DockPanel()
+                    .Spacing(8)
+                    .Children(
+                        new Button()
+                            .DockRight()
+                            .Content("폴더 선택")
+                            .OnClick(async () =>
+                            {
+                                var folder = FileDialog.SelectFolder(new FolderDialogOptions { Owner = Handle });
+                                if (!string.IsNullOrWhiteSpace(folder))
+                                {
+                                    _outputDirectoryTextBox.Text = folder;
+                                    await saveOutputDirectoryAsync(folder);
+                                }
+                            }),
+                        _outputDirectoryTextBox),
+                new TextBlock()
+                    .FontSize(11)
+                    .Text("직접 입력하거나 폴더를 선택하면 다음 다운로드부터 적용됩니다."));
+    }
+
+    private UIElement AccountSection(
+        ObservableValue<string> loginStatus,
+        Func<Window, Task> loginAsync,
+        Func<string, Task> saveCookieAsync,
+        Func<Task> clearCookieAsync)
+    {
+        return new StackPanel()
+            .Vertical()
+            .Spacing(8)
+            .Children(
+                new DockPanel()
+                    .Spacing(8)
+                    .Children(
+                        new Button().Content("다른 계정으로 로그인").OnClick(async () => await loginAsync(this)),
+                        new Button().Content("쿠키 저장").OnClick(async () => await saveCookieAsync(CookieHeader)),
+                        new Button().Content("삭제").OnClick(async () =>
+                        {
+                            await clearCookieAsync();
+                            _cookieTextBox.Text = "";
+                        }),
+                        new TextBlock().BindText(loginStatus).DockLeft().Width(120).CenterVertical().Bold()),
+                _cookieTextBox,
+                new TextBlock()
+                    .FontSize(11)
+                    .Text("저장된 쿠키가 만료되면 다운로드 시 자동으로 로그인 창이 열립니다. 이 화면은 계정 전환, 삭제, 수동 쿠키 저장이 필요할 때만 사용하세요."));
+    }
+
+    private static UIElement Section(string title, UIElement content)
+    {
+        return new StackPanel()
+            .Vertical()
+            .Spacing(6)
+            .Children(
+                new TextBlock().Text(title).Bold(),
+                new Border()
+                    .Padding(14)
+                    .BorderThickness(1)
+                    .CornerRadius(6)
+                    .Child(content));
     }
 }
 
