@@ -2,7 +2,7 @@
 
 아카라이브 게시글을 이미지와 함께 ZIP 파일로 저장하는 Windows GUI 다운로더입니다.
 
-현재 UI는 MewUI 기반이며 Native AOT publish를 목표로 합니다. Python 레거시 구현과 WPF UI는 제거되었습니다.
+현재 UI는 MewUI 기반이며 Native AOT publish를 목표로 합니다. Python 구현은 C# AOT로 포팅되었습니다.
 
 ## 기능
 
