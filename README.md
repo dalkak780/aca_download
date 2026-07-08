@@ -79,15 +79,15 @@ publish\ArcaDownloader.MewUI.exe
 
 `arca_icon.png`는 실행 파일에 embedded resource로 포함됩니다. `settings.ini`는 프로그램 실행 시 exe와 같은 폴더에 생성됩니다.
 
-## 이어받기
-
-다운로드 중 성공한 이미지는 출력 폴더의 `.arca_tmp\<url-hash>\images`에 즉시 저장됩니다. 프로세스가 중간에 꺼지거나 사용자가 중지해도 같은 URL을 다시 다운로드하면 이미 저장된 이미지는 재사용하고 나머지부터 진행합니다. ZIP 파일은 다운로드가 끝날 때 다시 생성됩니다.
-
 빌드 산출물 정리:
 
 ```powershell
 dotnet clean .\ArcaDownloader.sln
 ```
+
+## 이어받기
+
+다운로드 중 성공한 이미지는 출력 폴더의 `.arca_tmp\<url-hash>\images`에 즉시 저장됩니다. 프로세스가 중간에 꺼지거나 사용자가 중지해도 같은 URL을 다시 다운로드하면 이미 저장된 이미지는 재사용하고 나머지부터 진행합니다. ZIP 파일은 다운로드가 끝날 때 다시 생성됩니다.
 
 ## 로그인 동작
 
