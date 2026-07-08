@@ -89,4 +89,12 @@ public sealed class DownloadResumeStore
 
         return Path.Combine(ImagesDirectory, $"{fileName}{extension}");
     }
+
+    public void Delete()
+    {
+        if (Directory.Exists(RootDirectory))
+        {
+            Directory.Delete(RootDirectory, recursive: true);
+        }
+    }
 }

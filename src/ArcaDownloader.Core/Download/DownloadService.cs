@@ -88,6 +88,19 @@ public sealed class DownloadService
                 : await DownloadPreviewAsync(client, article.Images, cachedImages, resumeStore, log, progress, cancellationToken);
 
             var zipPath = await _zipWriter.WriteAsync(article, images, request.OutputDirectory, cancellationToken);
+            if (request.CleanupTempOnSuccess && images.Count == total)
+            {
+                try
+                {
+                    resumeStore.Delete();
+                    log?.Report($"[*] 완료된 임시 다운로드를 삭제했습니다: {resumeStore.RootDirectory}");
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    log?.Report($"[WARN] 임시 다운로드 삭제 실패: {ex.Message}");
+                }
+            }
+
             return new DownloadResult(zipPath, images.Count, total);
         }
     }

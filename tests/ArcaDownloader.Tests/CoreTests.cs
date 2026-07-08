@@ -285,6 +285,39 @@ public sealed class CoreTests
     }
 
     [Fact]
+    public async Task Resume_store_can_delete_completed_temp_directory()
+    {
+        var temp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"arca-resume-delete-{Guid.NewGuid():N}");
+        var article = new Article(
+            "테스트",
+            "작성자",
+            "오늘",
+            "https://arca.live/b/test/1",
+            "<p>body</p>",
+            [new ArticleImage(1, "https://ac-o.namu.la/a.png", "img_001.png")]);
+
+        try
+        {
+            var store = DownloadResumeStore.ForUrl(temp, article.SourceUrl);
+            await store.PrepareAsync(article);
+            await store.SaveImageAsync(article.Images[0], [1, 2, 3]);
+
+            Assert.True(Directory.Exists(store.RootDirectory));
+
+            store.Delete();
+
+            Assert.False(Directory.Exists(store.RootDirectory));
+        }
+        finally
+        {
+            if (Directory.Exists(temp))
+            {
+                Directory.Delete(temp, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task Image_fetch_retries_429_then_succeeds()
     {
         var calls = 0;

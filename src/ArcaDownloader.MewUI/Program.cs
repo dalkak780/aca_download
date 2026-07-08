@@ -1,6 +1,7 @@
 using System.Net;
 using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using Aprillz.MewUI;
@@ -12,6 +13,13 @@ using ArcaDownloader.Core.Services;
 using DirectN;
 using WebView2;
 using WebView2.Utilities;
+
+if (args.Contains("--check-session", StringComparer.OrdinalIgnoreCase))
+{
+    var exitCode = await RunSessionCheckCliAsync(args);
+    Environment.Exit(exitCode);
+    return;
+}
 
 Thread.CurrentThread.SetApartmentState(ApartmentState.Unknown);
 Thread.CurrentThread.SetApartmentState(ApartmentState.STA);
@@ -45,6 +53,127 @@ catch (Exception ex)
     NativeMessageBox.Show(ex.ToString(), "Fatal error", NativeMessageBoxButtons.Ok, NativeMessageBoxIcon.Error);
 }
 
+static async Task<int> RunSessionCheckCliAsync(string[] args)
+{
+    NativeMethods.AttachConsole(NativeMethods.AttachParentProcess);
+
+    var logPath = GetSessionCheckLogPath(args);
+    var lines = new List<string>
+    {
+        $"timestamp={DateTimeOffset.Now:O}",
+        $"cookie_path={CookieJar.Default().Path}"
+    };
+
+    try
+    {
+        var cookieJar = CookieJar.Default();
+        var cookies = await cookieJar.LoadAsync();
+        var saved = CookieJar.FromContainer(cookies, new Uri("https://arca.live/"));
+        lines.Add($"cookie_count={saved.Count}");
+        var requestCookies = cookies.GetCookies(new Uri("https://arca.live/settings/profile")).Cast<Cookie>().ToList();
+        var requestCookieHeader = cookies.GetCookieHeader(new Uri("https://arca.live/settings/profile"));
+        lines.Add($"request_cookie_names={string.Join(",", requestCookies.Select(cookie => cookie.Name))}");
+        lines.Add($"request_cookie_value_lengths={string.Join(",", requestCookies.Select(cookie => $"{cookie.Name}:{cookie.Value.Length}"))}");
+        lines.Add($"request_cookie_header_length={requestCookieHeader.Length}");
+        lines.Add($"request_cookie_header_names={string.Join(",", requestCookieHeader.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(part => part.Split('=', 2)[0]))}");
+
+        if (saved.Count == 0)
+        {
+            lines.Add("valid=False");
+            lines.Add("reason=No saved cookies");
+            WriteSessionCheckLines(lines, logPath);
+            return 2;
+        }
+
+        var plainResult = await CheckSessionWithPlainClientAsync(cookies);
+        lines.Add($"plain_valid={plainResult.IsValid}");
+        lines.Add($"plain_status_code={plainResult.StatusCode}");
+        lines.Add($"plain_final_uri={plainResult.FinalUri ?? ""}");
+        lines.Add($"plain_reason={plainResult.Reason}");
+
+        var result = await ArcaSessionValidator.CheckSessionAsync(cookies);
+        lines.Add($"valid={result.IsValid}");
+        lines.Add($"status_code={result.StatusCode}");
+        lines.Add($"final_uri={result.FinalUri ?? ""}");
+        lines.Add($"has_forbidden_marker={result.HasForbiddenMarker}");
+        lines.Add($"is_profile_uri={result.IsProfileUri}");
+        lines.Add($"reason={result.Reason}");
+        WriteSessionCheckLines(lines, logPath);
+        return result.IsValid ? 0 : 1;
+    }
+    catch (Exception ex)
+    {
+        lines.Add("valid=False");
+        lines.Add($"exception_type={ex.GetType().FullName}");
+        lines.Add($"exception_message={ex.Message}");
+        if (ex.InnerException is not null)
+        {
+            lines.Add($"inner_exception_type={ex.InnerException.GetType().FullName}");
+            lines.Add($"inner_exception_message={ex.InnerException.Message}");
+        }
+
+        WriteSessionCheckLines(lines, logPath);
+        return 3;
+    }
+}
+
+static async Task<ArcaSessionCheckResult> CheckSessionWithPlainClientAsync(CookieContainer cookies)
+{
+    var profileUri = new Uri("https://arca.live/settings/profile");
+    using var handler = new HttpClientHandler
+    {
+        CookieContainer = cookies,
+        AutomaticDecompression = DecompressionMethods.All,
+        UseCookies = true
+    };
+    using var client = new HttpClient(handler)
+    {
+        Timeout = Timeout.InfiniteTimeSpan
+    };
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+    client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("ko-KR,ko;q=0.9,en;q=0.8");
+    client.DefaultRequestHeaders.Referrer = profileUri;
+
+    using var response = await client.GetAsync(profileUri);
+    var html = await response.Content.ReadAsStringAsync();
+    var statusCode = (int)response.StatusCode;
+    var finalUri = response.RequestMessage?.RequestUri;
+    var hasForbiddenMarker = html.Contains("ERROR 403", StringComparison.OrdinalIgnoreCase)
+                             || html.Contains("권한이 없습니다.", StringComparison.OrdinalIgnoreCase);
+    var isProfileUri = finalUri is not null
+                       && finalUri.Host.EndsWith("arca.live", StringComparison.OrdinalIgnoreCase)
+                       && finalUri.AbsolutePath.Contains("/settings/profile", StringComparison.OrdinalIgnoreCase);
+    var valid = statusCode is not (401 or 403 or 451) && !hasForbiddenMarker && isProfileUri;
+    return new ArcaSessionCheckResult(valid, statusCode, finalUri?.ToString(), hasForbiddenMarker, isProfileUri, valid ? "OK" : $"HTTP {statusCode}");
+}
+
+static string GetSessionCheckLogPath(string[] args)
+{
+    var explicitPath = args
+        .FirstOrDefault(arg => arg.StartsWith("--check-session-log=", StringComparison.OrdinalIgnoreCase))
+        ?.Split('=', 2)[1];
+    return string.IsNullOrWhiteSpace(explicitPath)
+        ? Path.Combine(AppContext.BaseDirectory, "session-check.log")
+        : Path.GetFullPath(explicitPath);
+}
+
+static void WriteSessionCheckLines(IReadOnlyList<string> lines, string logPath)
+{
+    foreach (var line in lines)
+    {
+        Console.WriteLine(line);
+    }
+
+    var dir = Path.GetDirectoryName(logPath);
+    if (!string.IsNullOrWhiteSpace(dir))
+    {
+        Directory.CreateDirectory(dir);
+    }
+
+    File.WriteAllLines(logPath, lines, Encoding.UTF8);
+    Console.Out.Flush();
+}
+
 internal sealed class MainWindow : Window
 {
     private readonly List<TextBox> _urlBoxes = [];
@@ -53,6 +182,7 @@ internal sealed class MainWindow : Window
     private readonly DownloadService _downloadService = new();
     private readonly AsyncPauseGate _pauseGate = new();
     private readonly ObservableValue<string> _loginStatus = new("미로그인");
+    private readonly AccountSessionStatusStore _accountSessionStatus = new();
     private readonly ObservableValue<double> _totalProgress = new(0);
     private readonly ObservableValue<string> _totalProgressText = new("");
     private readonly ObservableValue<string> _totalEtaText = new("");
@@ -68,6 +198,7 @@ internal sealed class MainWindow : Window
     private StackPanel _urlRows = null!;
     private MultiLineTextBox _logTextBox = null!;
     private CheckBox _originalImageCheckBox = null!;
+    private CheckBox _cleanupTempCheckBox = null!;
     private Button _settingsButton = null!;
     private Button _startButton = null!;
     private Button _pauseButton = null!;
@@ -186,7 +317,13 @@ internal sealed class MainWindow : Window
     private UIElement SettingsSection()
     {
         _originalImageCheckBox = new CheckBox().Content("이미지 원본 다운로드 (체크 해제 시 미리보기 화질로 다운로드)").IsChecked(true);
-        return _originalImageCheckBox;
+        _cleanupTempCheckBox = new CheckBox().Content("완료된 임시 다운로드 삭제 (.arca_tmp)").IsChecked(false);
+        return new StackPanel()
+            .Vertical()
+            .Spacing(8)
+            .Children(
+                _originalImageCheckBox,
+                _cleanupTempCheckBox);
     }
 
     private Element ActionButtons()
@@ -242,7 +379,11 @@ internal sealed class MainWindow : Window
     {
         _cookies = await _cookieJar.LoadAsync();
         var saved = CookieJar.FromContainer(_cookies, new Uri("https://arca.live/"));
-        _loginStatus.Value = saved.Count > 0 ? "저장된 쿠키" : "미로그인";
+        SetLoginStatus(saved.Count > 0 ? "저장된 쿠키" : "미로그인");
+        if (saved.Count == 0)
+        {
+            _accountSessionStatus.Reset();
+        }
     }
 
     private async Task LoadSettingsAsync()
@@ -258,35 +399,17 @@ internal sealed class MainWindow : Window
     {
         await LoadSettingsAsync();
         await LoadCookiesAsync();
-        if (await HasValidSessionAsync())
+        var saved = CookieJar.FromContainer(_cookies, new Uri("https://arca.live/"));
+        if (saved.Count > 0)
         {
-            AppendLog("[*] 저장된 아카라이브 세션을 확인했습니다.");
+            AppendLog("[*] 저장된 아카라이브 세션을 사용합니다. 만료된 경우 다운로드 중 다시 로그인합니다.");
+            _ = TestSavedSessionAsync();
             return;
         }
 
-        _loginStatus.Value = "로그인 필요";
-        AppendLog("[*] 저장된 세션이 없거나 만료되어 로그인 창을 엽니다.");
+        SetLoginStatus("로그인 필요");
+        AppendLog("[*] 저장된 세션이 없어 로그인 창을 엽니다.");
         await LoginAsync(this);
-    }
-
-    private async Task<bool> HasValidSessionAsync()
-    {
-        var saved = CookieJar.FromContainer(_cookies, new Uri("https://arca.live/"));
-        if (saved.Count == 0)
-        {
-            return false;
-        }
-
-        try
-        {
-            return await ArcaSessionValidator.HasValidSessionAsync(_cookies);
-        }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
-        {
-            AppendLog($"[WARN] 세션 검증 실패: {ex.Message}");
-            _loginStatus.Value = "검증 실패";
-            return true;
-        }
     }
 
     private async Task ShowSettingsAsync()
@@ -295,9 +418,11 @@ internal sealed class MainWindow : Window
             _cookieHeader,
             _outputDirectory,
             _loginStatus,
+            _accountSessionStatus,
             LoginAsync,
             SaveCookieAsync,
             ClearCookieAsync,
+            TestSavedSessionAsync,
             async outputDirectory =>
             {
                 _outputDirectory = outputDirectory;
@@ -316,6 +441,7 @@ internal sealed class MainWindow : Window
         await _cookieJar.SaveFromHeaderAsync(_cookieHeader);
         await LoadCookiesAsync();
         AppendLog("[*] 수동 쿠키를 저장했습니다.");
+        _ = TestSavedSessionAsync();
     }
 
     private async Task ClearCookieAsync()
@@ -327,6 +453,7 @@ internal sealed class MainWindow : Window
 
         _cookieHeader = "";
         await LoadCookiesAsync();
+        _accountSessionStatus.Reset();
         AppendLog("[*] 저장된 쿠키를 삭제했습니다.");
     }
 
@@ -344,7 +471,7 @@ internal sealed class MainWindow : Window
 
     private async Task LoginAsync(Window owner)
     {
-        _loginStatus.Value = "로그인 중...";
+        SetLoginStatus("로그인 중...");
         try
         {
             var loginWindow = new LoginWindow();
@@ -353,19 +480,72 @@ internal sealed class MainWindow : Window
             {
                 await _cookieJar.SaveAsync(loginWindow.Cookies);
                 await LoadCookiesAsync();
+                _accountSessionStatus.Succeed();
                 AppendLog($"[*] WebView2 로그인 쿠키 {loginWindow.Cookies.Count}개를 저장했습니다.");
             }
             else
             {
-                _loginStatus.Value = "로그인 취소";
+                SetLoginStatus("로그인 취소");
                 AppendLog("[*] 로그인을 취소했습니다.");
             }
         }
         catch (Exception ex)
         {
-            _loginStatus.Value = "로그인 실패";
+            SetLoginStatus("로그인 실패");
             AppendLog($"[ERROR] 로그인 실패: {ex.Message}");
         }
+    }
+
+    private async Task TestSavedSessionAsync()
+    {
+        _cookies = await _cookieJar.LoadAsync();
+        var saved = CookieJar.FromContainer(_cookies, new Uri("https://arca.live/"));
+        if (saved.Count == 0)
+        {
+            _accountSessionStatus.Fail();
+            SetLoginStatus("미로그인");
+            AppendLog("[*] 저장된 세션이 없어 접속 테스트에 실패했습니다.");
+            return;
+        }
+
+        _accountSessionStatus.Checking();
+
+        try
+        {
+            var result = await ArcaSessionValidator.CheckSessionAsync(_cookies);
+            AppendLog($"[*] 접속 테스트: valid={result.IsValid}, status={result.StatusCode}, final={result.FinalUri}, reason={result.Reason}");
+            if (result.IsValid)
+            {
+                _accountSessionStatus.Succeed();
+                SetLoginStatus("유효함");
+                AppendLog("[*] 저장된 아카라이브 세션이 유효합니다.");
+            }
+            else if (IsInconclusiveHttpClientBlock(result))
+            {
+                _accountSessionStatus.Reset();
+                SetLoginStatus("검증 보류");
+                AppendLog("[WARN] .NET 10 HttpClient profile 요청이 403으로 차단되어 세션 유효성을 확정하지 않았습니다.");
+            }
+            else
+            {
+                _accountSessionStatus.Fail();
+                SetLoginStatus("쿠키 갱신 필요");
+                AppendLog("[*] 저장된 아카라이브 세션이 만료되었습니다. 다운로드 시 다시 로그인합니다.");
+            }
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
+        {
+            _accountSessionStatus.Fail();
+            SetLoginStatus("검증 실패");
+            AppendLog($"[WARN] 세션 검증 실패: {ex.Message}");
+        }
+    }
+
+    private static bool IsInconclusiveHttpClientBlock(ArcaSessionCheckResult result)
+    {
+        return result.StatusCode == 403
+               && result.IsProfileUri
+               && !result.HasForbiddenMarker;
     }
 
     private async Task StartAsync()
@@ -387,33 +567,8 @@ internal sealed class MainWindow : Window
         {
             foreach (var url in urls)
             {
-                var request = new DownloadRequest(
-                    url,
-                    _outputDirectory,
-                    _cookieHeader,
-                    _originalImageCheckBox.IsChecked == true);
-
-                var result = await _downloadService.DownloadAsync(
-                    request,
-                    _cookies,
-                    _pauseGate,
-                    new Progress<string>(AppendLog),
-                    new Progress<DownloadProgress>(UpdateProgress),
-                    _downloadCts.Token);
-
-                AppendLog($"[DONE] {result.ZipPath} ({result.DownloadedImages}/{result.TotalImages})");
-                var cookies = CookieJar.FromContainer(_cookies, new Uri("https://arca.live/"));
-                await _cookieJar.SaveAsync(cookies, _downloadCts.Token);
+                await DownloadUrlWithLoginRetryAsync(url, _downloadCts.Token);
             }
-        }
-        catch (AuthenticationRequiredException ex)
-        {
-            AppendLog($"[ERROR] {ex.Message}");
-            _loginStatus.Value = "쿠키 갱신 필요";
-            await MessageBox.NotifyAsync(
-                "저장된 쿠키가 유효하지 않습니다. 수동 쿠키를 저장하거나 로그인을 다시 실행하세요.",
-                PromptIconKind.Warning,
-                owner: this);
         }
         catch (OperationCanceledException)
         {
@@ -427,6 +582,54 @@ internal sealed class MainWindow : Window
         {
             SetDownloading(false);
         }
+    }
+
+    private async Task DownloadUrlWithLoginRetryAsync(string url, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await DownloadUrlAsync(url, cancellationToken);
+        }
+        catch (AuthenticationRequiredException ex)
+        {
+            AppendLog($"[WARN] {ex.Message}");
+            SetLoginStatus("쿠키 갱신 필요");
+            AppendLog("[*] 저장된 세션이 만료되어 로그인 창을 엽니다.");
+
+            await LoginAsync(this);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var saved = CookieJar.FromContainer(_cookies, new Uri("https://arca.live/"));
+            if (saved.Count == 0)
+            {
+                throw;
+            }
+
+            AppendLog("[*] 새 로그인 세션으로 다운로드를 다시 시도합니다.");
+            await DownloadUrlAsync(url, cancellationToken);
+        }
+    }
+
+    private async Task DownloadUrlAsync(string url, CancellationToken cancellationToken)
+    {
+        var request = new DownloadRequest(
+            url,
+            _outputDirectory,
+            _cookieHeader,
+            _originalImageCheckBox.IsChecked == true,
+            _cleanupTempCheckBox.IsChecked == true);
+
+        var result = await _downloadService.DownloadAsync(
+            request,
+            _cookies,
+            _pauseGate,
+            new Progress<string>(AppendLog),
+            new Progress<DownloadProgress>(UpdateProgress),
+            cancellationToken);
+
+        AppendLog($"[DONE] {result.ZipPath} ({result.DownloadedImages}/{result.TotalImages})");
+        var cookies = CookieJar.FromContainer(_cookies, new Uri("https://arca.live/"));
+        await _cookieJar.SaveAsync(cookies, cancellationToken);
     }
 
     private void PauseOrResume()
@@ -499,6 +702,14 @@ internal sealed class MainWindow : Window
         });
     }
 
+    private void SetLoginStatus(string status)
+    {
+        Application.Current.Dispatcher!.BeginInvoke(() =>
+        {
+            _loginStatus.Value = status;
+        });
+    }
+
     private static void SetButtonText(Button button, string text)
     {
         button.Content = new TextBlock { Text = text };
@@ -515,6 +726,66 @@ internal sealed class MainWindow : Window
     }
 }
 
+internal sealed class AccountSessionStatusStore
+{
+    public ObservableValue<bool> ShowSuccess { get; } = new(false);
+
+    public ObservableValue<bool> ShowFailure { get; } = new(false);
+
+    public ObservableValue<bool> ShowBusy { get; } = new(false);
+
+    public ObservableValue<string> BusyText { get; } = new("");
+
+    public void Reset()
+    {
+        Update(() =>
+        {
+            ShowSuccess.Value = false;
+            ShowFailure.Value = false;
+            ShowBusy.Value = false;
+            BusyText.Value = "";
+        });
+    }
+
+    public void Checking()
+    {
+        Update(() =>
+        {
+            ShowSuccess.Value = false;
+            ShowFailure.Value = false;
+            ShowBusy.Value = true;
+            BusyText.Value = "접속 테스트 중...";
+        });
+    }
+
+    public void Succeed()
+    {
+        Update(() =>
+        {
+            ShowSuccess.Value = true;
+            ShowFailure.Value = false;
+            ShowBusy.Value = false;
+            BusyText.Value = "";
+        });
+    }
+
+    public void Fail()
+    {
+        Update(() =>
+        {
+            ShowSuccess.Value = false;
+            ShowFailure.Value = true;
+            ShowBusy.Value = false;
+            BusyText.Value = "";
+        });
+    }
+
+    private static void Update(Action action)
+    {
+        Application.Current.Dispatcher!.BeginInvoke(action);
+    }
+}
+
 internal sealed class SettingsWindow : Window
 {
     private readonly TextBox _cookieTextBox;
@@ -524,9 +795,11 @@ internal sealed class SettingsWindow : Window
         string cookieHeader,
         string outputDirectory,
         ObservableValue<string> loginStatus,
+        AccountSessionStatusStore accountSessionStatus,
         Func<Window, Task> loginAsync,
         Func<string, Task> saveCookieAsync,
         Func<Task> clearCookieAsync,
+        Func<Task> testSessionAsync,
         Func<string, Task> saveOutputDirectoryAsync)
     {
         Title = "설정";
@@ -548,7 +821,7 @@ internal sealed class SettingsWindow : Window
             .Padding(24)
             .Children(
                 Section("저장 위치", OutputSection(saveOutputDirectoryAsync)),
-                Section("계정 관리", AccountSection(loginStatus, loginAsync, saveCookieAsync, clearCookieAsync)),
+                Section("계정 관리", AccountSection(loginStatus, accountSessionStatus, loginAsync, saveCookieAsync, clearCookieAsync, testSessionAsync)),
                 new DockPanel()
                     .Children(
                         new Button()
@@ -590,9 +863,11 @@ internal sealed class SettingsWindow : Window
 
     private UIElement AccountSection(
         ObservableValue<string> loginStatus,
+        AccountSessionStatusStore accountSessionStatus,
         Func<Window, Task> loginAsync,
         Func<string, Task> saveCookieAsync,
-        Func<Task> clearCookieAsync)
+        Func<Task> clearCookieAsync,
+        Func<Task> testSessionAsync)
     {
         return new StackPanel()
             .Vertical()
@@ -601,7 +876,8 @@ internal sealed class SettingsWindow : Window
                 new DockPanel()
                     .Spacing(8)
                     .Children(
-                        new Button().Content("다른 계정으로 로그인").OnClick(async () => await loginAsync(this)),
+                        new Button().Content("로그인").OnClick(async () => await loginAsync(this)),
+                        new Button().Content("접속 테스트").OnClick(async () => await testSessionAsync()),
                         new Button().Content("쿠키 저장").OnClick(async () => await saveCookieAsync(CookieHeader)),
                         new Button().Content("삭제").OnClick(async () =>
                         {
@@ -609,6 +885,24 @@ internal sealed class SettingsWindow : Window
                             _cookieTextBox.Text = "";
                         }),
                         new TextBlock().BindText(loginStatus).DockLeft().Width(120).CenterVertical().Bold()),
+                new StackPanel()
+                    .Horizontal()
+                    .Spacing(8)
+                    .Children(
+                        new TextBlock()
+                            .Text("● 로그인 성공")
+                            .Foreground(new Color(34, 197, 94))
+                            .Bold()
+                            .BindIsVisible(accountSessionStatus.ShowSuccess),
+                        new TextBlock()
+                            .Text("● 로그인 실패")
+                            .Foreground(new Color(239, 68, 68))
+                            .Bold()
+                            .BindIsVisible(accountSessionStatus.ShowFailure),
+                        new TextBlock()
+                            .BindText(accountSessionStatus.BusyText)
+                            .CenterVertical()
+                            .BindIsVisible(accountSessionStatus.ShowBusy)),
                 _cookieTextBox,
                 new TextBlock()
                     .FontSize(11)
@@ -949,6 +1243,15 @@ internal sealed class AppSettingsStore
 }
 
 internal sealed record AppSettings(string? OutputDirectory);
+
+internal static partial class NativeMethods
+{
+    public const uint AttachParentProcess = 0xFFFFFFFF;
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool AttachConsole(uint processId);
+}
 
 internal static class FluentHelpers
 {

@@ -18,5 +18,5 @@ public sealed record DownloadRequest(
     string Url,
     string OutputDirectory,
     string CookieHeader,
-    bool DownloadOriginal);
-
+    bool DownloadOriginal,
+    bool CleanupTempOnSuccess = false);
