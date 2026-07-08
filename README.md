@@ -93,6 +93,10 @@ dotnet clean .\ArcaDownloader.sln
 
 로그인 창은 WebView2를 사용합니다. 로그인 완료 확인 시 `https://arca.live/settings/profile`로 실제 이동해 접근 가능 여부를 확인하고, WebView2 CookieManager에서 arca.live 쿠키를 저장합니다. 이 방식은 `document.cookie`에 노출되지 않는 HttpOnly 쿠키도 처리합니다.
 
+## 크레딧
+
+이 프로젝트는 [anycall6779/aca_download](https://github.com/anycall6779/aca_download)의 Python 구현을 C# / MewUI 기반 Windows Native AOT 애플리케이션으로 포팅한 버전입니다.
+
 ## 라이선스
 
 MIT
