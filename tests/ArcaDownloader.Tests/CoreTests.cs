@@ -161,7 +161,11 @@ public sealed class CoreTests
 
         try
         {
-            var path = await new ZipWriter().WriteAsync(article, new Dictionary<int, byte[]> { [1] = [1, 2, 3] }, temp);
+            var imagePath = Path.Combine(temp, "img_001.png");
+            Directory.CreateDirectory(temp);
+            await File.WriteAllBytesAsync(imagePath, [1, 2, 3]);
+
+            var path = await new ZipWriter().WriteAsync(article, new Dictionary<int, string> { [1] = imagePath }, temp);
             using (var archive = ZipFile.OpenRead(path))
             {
                 Assert.NotNull(archive.GetEntry("post.html"));
@@ -198,7 +202,7 @@ public sealed class CoreTests
 
         try
         {
-            var path = await new ZipWriter().WriteAsync(article, new Dictionary<int, byte[]>(), temp);
+            var path = await new ZipWriter().WriteAsync(article, new Dictionary<int, string>(), temp);
 
             Assert.EndsWith(Path.Combine(temp, "arca-공백 있는 제목.zip"), path);
             Assert.True(File.Exists(path));
@@ -233,9 +237,9 @@ public sealed class CoreTests
             await store.PrepareAsync(article);
             await store.SaveImageAsync(article.Images[0], [1, 2, 3]);
 
-            var restored = await store.LoadImagesAsync(article.Images);
+            var restored = await store.LoadImagePathsAsync(article.Images);
 
-            Assert.Equal([1, 2, 3], restored[1]);
+            Assert.Equal([1, 2, 3], await File.ReadAllBytesAsync(restored[1]));
             Assert.False(restored.ContainsKey(2));
             Assert.True(File.Exists(Path.Combine(store.ImagesDirectory, "img_001.png")));
         }
@@ -267,7 +271,7 @@ public sealed class CoreTests
             await File.WriteAllBytesAsync(Path.Combine(store.ImagesDirectory, "img_001.png.part"), [1, 2, 3]);
             await File.WriteAllBytesAsync(Path.Combine(store.ImagesDirectory, "img_001.png"), []);
 
-            var restored = await store.LoadImagesAsync(article.Images);
+            var restored = await store.LoadImagePathsAsync(article.Images);
 
             Assert.Empty(restored);
         }
@@ -292,10 +296,25 @@ public sealed class CoreTests
                 : new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([7, 8, 9]) };
         }));
 
-        var data = await DownloadService.FetchImageAsync(client, "https://example.test/image.png", null, null, CancellationToken.None);
+        var temp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"arca-fetch-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(temp);
+        var imagePath = Path.Combine(temp, "image.png");
 
-        Assert.Equal([7, 8, 9], data);
-        Assert.Equal(2, calls);
+        try
+        {
+            var bytes = await DownloadService.FetchImageToFileAsync(client, "https://example.test/image.png", imagePath, null, null, CancellationToken.None);
+
+            Assert.Equal(3, bytes);
+            Assert.Equal([7, 8, 9], await File.ReadAllBytesAsync(imagePath));
+            Assert.Equal(2, calls);
+        }
+        finally
+        {
+            if (Directory.Exists(temp))
+            {
+                Directory.Delete(temp, recursive: true);
+            }
+        }
     }
 
     private sealed class Handler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler

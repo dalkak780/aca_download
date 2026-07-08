@@ -9,7 +9,7 @@ public sealed class ZipWriter
 {
     public async Task<string> WriteAsync(
         Article article,
-        IReadOnlyDictionary<int, byte[]> downloadedImages,
+        IReadOnlyDictionary<int, string> downloadedImages,
         string outputDirectory,
         CancellationToken cancellationToken = default)
     {
@@ -23,7 +23,13 @@ public sealed class ZipWriter
         var contentHtml = article.ContentHtml;
         foreach (var image in article.Images)
         {
-            if (!downloadedImages.TryGetValue(image.Index, out var data) || data.Length == 0)
+            if (!downloadedImages.TryGetValue(image.Index, out var imagePath) || !File.Exists(imagePath))
+            {
+                continue;
+            }
+
+            var imageFile = new FileInfo(imagePath);
+            if (imageFile.Length == 0)
             {
                 continue;
             }
@@ -31,7 +37,8 @@ public sealed class ZipWriter
             var entry = archive.CreateEntry($"images/{image.FileName}", CompressionLevel.Optimal);
             await using (var entryStream = entry.Open())
             {
-                await entryStream.WriteAsync(data, cancellationToken);
+                await using var imageStream = File.OpenRead(imagePath);
+                await imageStream.CopyToAsync(entryStream, cancellationToken);
             }
 
             downloadedNames.Add(image.FileName);

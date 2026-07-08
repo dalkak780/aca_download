@@ -109,7 +109,7 @@ jobs:
             throw "No release assets found."
           }
 
-          $releaseArgs = @("release", "create", $tag) + $assets + @("--title", $tag, "--notes", "Native AOT Windows builds.")
+          $releaseArgs = @("release", "create", $tag) + $assets + @("--title", $tag, "--notes-from-tag")
           if ($env:INPUT_PRERELEASE -eq "true") {
             $releaseArgs += "--prerelease"
           }

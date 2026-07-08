@@ -35,11 +35,11 @@ public sealed class DownloadResumeStore
         await File.WriteAllTextAsync(Path.Combine(RootDirectory, "resume.txt"), meta, Encoding.UTF8, cancellationToken);
     }
 
-    public async Task<Dictionary<int, byte[]>> LoadImagesAsync(
+    public Task<Dictionary<int, string>> LoadImagePathsAsync(
         IReadOnlyList<ArticleImage> images,
         CancellationToken cancellationToken = default)
     {
-        var restored = new Dictionary<int, byte[]>();
+        var restored = new Dictionary<int, string>();
         foreach (var image in images)
         {
             var path = GetImagePath(image);
@@ -54,10 +54,10 @@ public sealed class DownloadResumeStore
                 continue;
             }
 
-            restored[image.Index] = await File.ReadAllBytesAsync(path, cancellationToken);
+            restored[image.Index] = path;
         }
 
-        return restored;
+        return Task.FromResult(restored);
     }
 
     public async Task SaveImageAsync(
@@ -78,7 +78,7 @@ public sealed class DownloadResumeStore
         File.Move(partialPath, path, overwrite: true);
     }
 
-    private string GetImagePath(ArticleImage image)
+    public string GetImagePath(ArticleImage image)
     {
         var fileName = TextHelpers.SanitizeFileName(Path.GetFileNameWithoutExtension(image.FileName), 120);
         var extension = Path.GetExtension(image.FileName);

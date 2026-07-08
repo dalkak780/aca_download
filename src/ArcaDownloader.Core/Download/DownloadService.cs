@@ -71,7 +71,7 @@ public sealed class DownloadService
 
             var resumeStore = DownloadResumeStore.ForUrl(request.OutputDirectory, request.Url);
             await resumeStore.PrepareAsync(article, cancellationToken);
-            var cachedImages = await resumeStore.LoadImagesAsync(article.Images, cancellationToken);
+            var cachedImages = await resumeStore.LoadImagePathsAsync(article.Images, cancellationToken);
             if (cachedImages.Count > 0)
             {
                 log?.Report($"[*] 이전 성공분 {cachedImages.Count}개를 재사용합니다: {resumeStore.ImagesDirectory}");
@@ -92,18 +92,18 @@ public sealed class DownloadService
         }
     }
 
-    private static async Task<Dictionary<int, byte[]>> DownloadSequentialAsync(
+    private static async Task<Dictionary<int, string>> DownloadSequentialAsync(
         HttpClient client,
         IReadOnlyList<ArticleImage> images,
-        Dictionary<int, byte[]> cachedImages,
+        Dictionary<int, string> cachedImages,
         DownloadResumeStore resumeStore,
         AsyncPauseGate pauseGate,
         IProgress<string>? log,
         IProgress<DownloadProgress>? progress,
         CancellationToken cancellationToken)
     {
-        var results = new Dictionary<int, byte[]>(cachedImages);
-        var completedSizes = cachedImages.Values.Select(data => (long)data.Length).ToList();
+        var results = new Dictionary<int, string>(cachedImages);
+        var completedSizes = cachedImages.Values.Select(path => new FileInfo(path).Length).ToList();
         var global = Stopwatch.StartNew();
 
         foreach (var image in images)
@@ -119,7 +119,8 @@ public sealed class DownloadService
             log?.Report($"  [{image.Index:000}/{images.Count}] {image.SourceUrl}");
 
             var imageWatch = Stopwatch.StartNew();
-            var data = await FetchImageAsync(client, image.SourceUrl, log, async (downloaded, total) =>
+            var destinationPath = resumeStore.GetImagePath(image);
+            var bytesWritten = await FetchImageToFileAsync(client, image.SourceUrl, destinationPath, log, async (downloaded, total) =>
             {
                 await pauseGate.WaitAsync(cancellationToken);
                 var speed = imageWatch.Elapsed.TotalSeconds > 0 ? downloaded / imageWatch.Elapsed.TotalSeconds : 0;
@@ -147,11 +148,10 @@ public sealed class DownloadService
                 progress?.Report(new DownloadProgress(results.Count, images.Count, downloaded, total, speed, imageEta, totalEta));
             }, cancellationToken);
 
-            if (data.Length > 0)
+            if (bytesWritten > 0)
             {
-                await resumeStore.SaveImageAsync(image, data, cancellationToken);
-                results[image.Index] = data;
-                completedSizes.Add(data.Length);
+                results[image.Index] = destinationPath;
+                completedSizes.Add(bytesWritten);
             }
             else
             {
@@ -164,16 +164,16 @@ public sealed class DownloadService
         return results;
     }
 
-    private static async Task<Dictionary<int, byte[]>> DownloadPreviewAsync(
+    private static async Task<Dictionary<int, string>> DownloadPreviewAsync(
         HttpClient client,
         IReadOnlyList<ArticleImage> images,
-        Dictionary<int, byte[]> cachedImages,
+        Dictionary<int, string> cachedImages,
         DownloadResumeStore resumeStore,
         IProgress<string>? log,
         IProgress<DownloadProgress>? progress,
         CancellationToken cancellationToken)
     {
-        var results = new Dictionary<int, byte[]>(cachedImages);
+        var results = new Dictionary<int, string>(cachedImages);
         var done = cachedImages.Count;
         var lockObject = new object();
         var throttle = new SemaphoreSlim(1, 1);
@@ -204,15 +204,12 @@ public sealed class DownloadService
             }
 
             log?.Report($"  [{image.Index:000}/{images.Count}] {image.SourceUrl}");
-            var data = await FetchImageAsync(client, image.SourceUrl, log, null, cancellationToken);
-            if (data.Length > 0)
-            {
-                await resumeStore.SaveImageAsync(image, data, cancellationToken);
-            }
+            var destinationPath = resumeStore.GetImagePath(image);
+            var bytesWritten = await FetchImageToFileAsync(client, image.SourceUrl, destinationPath, log, null, cancellationToken);
 
             lock (lockObject)
             {
-                if (data.Length > 0) results[image.Index] = data;
+                if (bytesWritten > 0) results[image.Index] = destinationPath;
                 else log?.Report("       → 건너뜀");
                 done++;
                 progress?.Report(new DownloadProgress(done, images.Count, 0, 0, 0, null, null));
@@ -228,9 +225,10 @@ public sealed class DownloadService
         return results;
     }
 
-    internal static async Task<byte[]> FetchImageAsync(
+    internal static async Task<long> FetchImageToFileAsync(
         HttpClient client,
         string sourceUrl,
+        string destinationPath,
         IProgress<string>? log,
         Func<long, long, Task>? chunkProgress,
         CancellationToken cancellationToken)
@@ -251,46 +249,75 @@ public sealed class DownloadService
 
                 response.EnsureSuccessStatusCode();
                 var total = response.Content.Headers.ContentLength ?? -1;
+                Directory.CreateDirectory(Path.GetDirectoryName(destinationPath) ?? ".");
+                var partialPath = destinationPath + ".part";
                 await using var input = await response.Content.ReadAsStreamAsync(attemptCts.Token);
-                using var output = new MemoryStream();
+                await using var output = File.Create(partialPath);
                 var buffer = new byte[8192];
+                long bytesWritten = 0;
                 int read;
                 while ((read = await input.ReadAsync(buffer, attemptCts.Token)) > 0)
                 {
                     attemptCts.CancelAfter(ImageIdleTimeout);
                     await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                    bytesWritten += read;
                     if (chunkProgress is not null)
                     {
-                        await chunkProgress(output.Length, total);
+                        await chunkProgress(bytesWritten, total);
                     }
                 }
 
-                return output.ToArray();
+                await output.FlushAsync(cancellationToken);
+                output.Close();
+                File.Move(partialPath, destinationPath, overwrite: true);
+                return bytesWritten;
             }
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested && attempt < FetchRetry)
             {
+                TryDeletePartial(destinationPath);
                 log?.Report($"    [WARN] 실패: {ex.Message} — {FetchWait.TotalSeconds:0}s 후 재시도 ({attempt}/{FetchRetry})");
                 await Task.Delay(FetchWait, cancellationToken);
             }
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
             {
+                TryDeletePartial(destinationPath);
                 log?.Report($"    [WARN] 최종 실패 ({FetchRetry}회): {ex.Message}");
             }
             catch (Exception ex) when (ex is not OperationCanceledException && attempt < FetchRetry)
             {
+                TryDeletePartial(destinationPath);
                 log?.Report($"    [WARN] 실패: {ex.Message} — {FetchWait.TotalSeconds:0}s 후 재시도 ({attempt}/{FetchRetry})");
                 await Task.Delay(FetchWait, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                TryDeletePartial(destinationPath);
                 log?.Report($"    [WARN] 최종 실패 ({FetchRetry}회): {ex.Message}");
             }
         }
 
-        return [];
+        return 0;
     }
 
     private static string Fallback(string value) => string.IsNullOrWhiteSpace(value) ? "Unknown" : value;
+
+    private static void TryDeletePartial(string destinationPath)
+    {
+        var partialPath = destinationPath + ".part";
+        try
+        {
+            if (File.Exists(partialPath))
+            {
+                File.Delete(partialPath);
+            }
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
 }
 
 public sealed class AuthenticationRequiredException(string message) : Exception(message);
