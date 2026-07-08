@@ -20,9 +20,7 @@
 ```text
 src/
 ├── ArcaDownloader.Core/          # 다운로드, 파싱, 쿠키 저장, ZIP 생성
-└── ArcaDownloader/
-    ├── arca_icon.ico
-    └── ArcaDownloader.MewUI/     # MewUI Windows GUI
+└── ArcaDownloader.MewUI/         # MewUI Windows GUI
 tests/
 └── ArcaDownloader.Tests/
 ```
@@ -56,7 +54,7 @@ dotnet test .\ArcaDownloader.sln -c Release
 Native AOT publish:
 
 ```powershell
-dotnet publish .\src\ArcaDownloader\ArcaDownloader.MewUI\ArcaDownloader.MewUI.csproj -c Release -r win-x64 -o .\publish
+dotnet publish .\src\ArcaDownloader.MewUI\ArcaDownloader.MewUI.csproj -c Release -r win-x64 -o .\publish
 ```
 
 간편 빌드 스크립트:

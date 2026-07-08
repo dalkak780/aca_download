@@ -3,6 +3,7 @@ obj/
 dist/
 build/
 publish/
+.omx/
 .arca_tmp/
 .setup_done
 msedgedriver.exe

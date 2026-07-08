@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Solution = Join-Path $Root "ArcaDownloader.sln"
-$Project = Join-Path $Root "src\ArcaDownloader\ArcaDownloader.MewUI\ArcaDownloader.MewUI.csproj"
+$Project = Join-Path $Root "src\ArcaDownloader.MewUI\ArcaDownloader.MewUI.csproj"
 $OutputPath = Join-Path $Root $Output
 
 function Invoke-Checked {

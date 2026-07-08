@@ -13,11 +13,11 @@
     <DebugType>None</DebugType>
     <DebugSymbols>false</DebugSymbols>
     <MewUIBackend>Gdi</MewUIBackend>
-    <ApplicationIcon>..\arca_icon.ico</ApplicationIcon>
+    <ApplicationIcon>arca_icon.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\ArcaDownloader.Core\ArcaDownloader.Core.csproj" />
+    <ProjectReference Include="..\ArcaDownloader.Core\ArcaDownloader.Core.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -26,8 +26,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="..\..\..\arca_icon.png" LogicalName="arca_icon.png" />
-    <None Include="..\arca_icon.ico" Link="arca_icon.ico" />
+    <EmbeddedResource Include="..\..\arca_icon.png" LogicalName="arca_icon.png" />
+    <None Include="arca_icon.ico" />
   </ItemGroup>
 
   <Target Name="RemovePublishSymbols" AfterTargets="Publish">
