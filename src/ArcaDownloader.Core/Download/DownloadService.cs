@@ -22,6 +22,7 @@ public sealed class DownloadService
         AsyncPauseGate pauseGate,
         IProgress<string>? log = null,
         IProgress<DownloadProgress>? progress = null,
+        Func<Uri, CancellationToken, Task<string>>? articleHtmlFallback = null,
         CancellationToken cancellationToken = default)
     {
         var uri = new Uri(request.Url);
@@ -53,56 +54,76 @@ public sealed class DownloadService
         {
             if ((int)response.StatusCode is 401 or 403 or 451)
             {
+                if (response.StatusCode == HttpStatusCode.Forbidden && articleHtmlFallback is not null)
+                {
+                    log?.Report($"[WARN] HTTP {(int)response.StatusCode}: WebView2로 게시글 HTML 가져오기를 시도합니다.");
+                    var fallbackHtml = await articleHtmlFallback(uri, cancellationToken);
+                    return await DownloadFromHtmlAsync(request, client, fallbackHtml, uri, pauseGate, log, progress, cancellationToken);
+                }
+
                 throw new AuthenticationRequiredException($"HTTP {(int)response.StatusCode}: 유효한 아카라이브 로그인 쿠키가 필요합니다.");
             }
             response.EnsureSuccessStatusCode();
 
             var html = await response.Content.ReadAsStringAsync(cancellationToken);
-            var article = await _parser.ParseAsync(html, request.Url, request.DownloadOriginal, cancellationToken);
-
-            log?.Report($"    제목  : {article.Title}");
-            log?.Report($"    작성자: {Fallback(article.Author)}");
-            log?.Report($"    작성일: {Fallback(article.Date)}");
-
-            var total = article.Images.Count;
-            log?.Report(request.DownloadOriginal
-                ? $"[*] 이미지 {total}개 순차 다운로드 (ArcaRefresher 방식, 최대 {FetchRetry}회 재시도)..."
-                : $"[*] 이미지 {total}개 다운로드 (워커 {Math.Min(MaxWorkers, Math.Max(total, 1))}개)...");
-
-            var resumeStore = DownloadResumeStore.ForUrl(request.OutputDirectory, request.Url);
-            await resumeStore.PrepareAsync(article, cancellationToken);
-            var cachedImages = await resumeStore.LoadImagePathsAsync(article.Images, cancellationToken);
-            if (cachedImages.Count > 0)
-            {
-                log?.Report($"[*] 이전 성공분 {cachedImages.Count}개를 재사용합니다: {resumeStore.ImagesDirectory}");
-            }
-            else
-            {
-                log?.Report($"[*] 재개 기록 위치: {resumeStore.ImagesDirectory}");
-            }
-
-            progress?.Report(new DownloadProgress(cachedImages.Count, total, 0, 0, 0, null, null));
-
-            var images = request.DownloadOriginal
-                ? await DownloadSequentialAsync(client, article.Images, cachedImages, resumeStore, pauseGate, log, progress, cancellationToken)
-                : await DownloadPreviewAsync(client, article.Images, cachedImages, resumeStore, log, progress, cancellationToken);
-
-            var zipPath = await _zipWriter.WriteAsync(article, images, request.OutputDirectory, cancellationToken);
-            if (request.CleanupTempOnSuccess && images.Count == total)
-            {
-                try
-                {
-                    resumeStore.Delete();
-                    log?.Report($"[*] 완료된 임시 다운로드를 삭제했습니다: {resumeStore.RootDirectory}");
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                {
-                    log?.Report($"[WARN] 임시 다운로드 삭제 실패: {ex.Message}");
-                }
-            }
-
-            return new DownloadResult(zipPath, images.Count, total);
+            return await DownloadFromHtmlAsync(request, client, html, uri, pauseGate, log, progress, cancellationToken);
         }
+    }
+
+    private async Task<DownloadResult> DownloadFromHtmlAsync(
+        DownloadRequest request,
+        HttpClient client,
+        string html,
+        Uri resumeStoreUrl,
+        AsyncPauseGate pauseGate,
+        IProgress<string>? log,
+        IProgress<DownloadProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var article = await _parser.ParseAsync(html, request.Url, request.DownloadOriginal, cancellationToken);
+
+        log?.Report($"    제목  : {article.Title}");
+        log?.Report($"    작성자: {Fallback(article.Author)}");
+        log?.Report($"    작성일: {Fallback(article.Date)}");
+
+        var total = article.Images.Count;
+        log?.Report(request.DownloadOriginal
+            ? $"[*] 이미지 {total}개 순차 다운로드 (ArcaRefresher 방식, 최대 {FetchRetry}회 재시도)..."
+            : $"[*] 이미지 {total}개 다운로드 (워커 {Math.Min(MaxWorkers, Math.Max(total, 1))}개)...");
+
+        var resumeStore = DownloadResumeStore.ForUrl(request.OutputDirectory, resumeStoreUrl.ToString());
+        await resumeStore.PrepareAsync(article, cancellationToken);
+        var cachedImages = await resumeStore.LoadImagePathsAsync(article.Images, cancellationToken);
+        if (cachedImages.Count > 0)
+        {
+            log?.Report($"[*] 이전 성공분 {cachedImages.Count}개를 재사용합니다: {resumeStore.ImagesDirectory}");
+        }
+        else
+        {
+            log?.Report($"[*] 재개 기록 위치: {resumeStore.ImagesDirectory}");
+        }
+
+        progress?.Report(new DownloadProgress(cachedImages.Count, total, 0, 0, 0, null, null));
+
+        var images = request.DownloadOriginal
+            ? await DownloadSequentialAsync(client, article.Images, cachedImages, resumeStore, pauseGate, log, progress, cancellationToken)
+            : await DownloadPreviewAsync(client, article.Images, cachedImages, resumeStore, log, progress, cancellationToken);
+
+        var zipPath = await _zipWriter.WriteAsync(article, images, request.OutputDirectory, cancellationToken);
+        if (request.CleanupTempOnSuccess && images.Count == total)
+        {
+            try
+            {
+                resumeStore.Delete();
+                log?.Report($"[*] 완료된 임시 다운로드를 삭제했습니다: {resumeStore.RootDirectory}");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                log?.Report($"[WARN] 임시 다운로드 삭제 실패: {ex.Message}");
+            }
+        }
+
+        return new DownloadResult(zipPath, images.Count, total);
     }
 
     private static async Task<Dictionary<int, string>> DownloadSequentialAsync(

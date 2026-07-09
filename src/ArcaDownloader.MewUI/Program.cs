@@ -399,17 +399,35 @@ internal sealed class MainWindow : Window
     {
         await LoadSettingsAsync();
         await LoadCookiesAsync();
-        var saved = CookieJar.FromContainer(_cookies, new Uri("https://arca.live/"));
-        if (saved.Count > 0)
+        if (await HasValidSessionAsync())
         {
-            AppendLog("[*] 저장된 아카라이브 세션을 사용합니다. 만료된 경우 다운로드 중 다시 로그인합니다.");
-            _ = TestSavedSessionAsync();
+            AppendLog("[*] 저장된 아카라이브 세션을 확인했습니다.");
             return;
         }
 
         SetLoginStatus("로그인 필요");
-        AppendLog("[*] 저장된 세션이 없어 로그인 창을 엽니다.");
+        AppendLog("[*] 저장된 세션이 없거나 만료되어 로그인 창을 엽니다.");
         await LoginAsync(this);
+    }
+
+    private async Task<bool> HasValidSessionAsync()
+    {
+        var saved = CookieJar.FromContainer(_cookies, new Uri("https://arca.live/"));
+        if (saved.Count == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            return await ArcaSessionValidator.HasValidSessionAsync(_cookies);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
+        {
+            AppendLog($"[WARN] 세션 검증 실패: {ex.Message}");
+            SetLoginStatus("검증 실패");
+            return true;
+        }
     }
 
     private async Task ShowSettingsAsync()
@@ -498,8 +516,8 @@ internal sealed class MainWindow : Window
 
     private async Task TestSavedSessionAsync()
     {
-        _cookies = await _cookieJar.LoadAsync();
-        var saved = CookieJar.FromContainer(_cookies, new Uri("https://arca.live/"));
+        var cookies = await _cookieJar.LoadAsync();
+        var saved = CookieJar.FromContainer(cookies, new Uri("https://arca.live/"));
         if (saved.Count == 0)
         {
             _accountSessionStatus.Fail();
@@ -512,7 +530,7 @@ internal sealed class MainWindow : Window
 
         try
         {
-            var result = await ArcaSessionValidator.CheckSessionAsync(_cookies);
+            var result = await ArcaSessionValidator.CheckSessionAsync(cookies);
             AppendLog($"[*] 접속 테스트: valid={result.IsValid}, status={result.StatusCode}, final={result.FinalUri}, reason={result.Reason}");
             if (result.IsValid)
             {
@@ -567,8 +585,35 @@ internal sealed class MainWindow : Window
         {
             foreach (var url in urls)
             {
-                await DownloadUrlWithLoginRetryAsync(url, _downloadCts.Token);
+                var request = new DownloadRequest(
+                    url,
+                    _outputDirectory,
+                    _cookieHeader,
+                    _originalImageCheckBox.IsChecked == true,
+                    _cleanupTempCheckBox.IsChecked == true);
+
+                var result = await _downloadService.DownloadAsync(
+                    request,
+                    _cookies,
+                    _pauseGate,
+                    new Progress<string>(AppendLog),
+                    new Progress<DownloadProgress>(UpdateProgress),
+                    FetchArticleHtmlWithWebViewAsync,
+                    _downloadCts.Token);
+
+                AppendLog($"[DONE] {result.ZipPath} ({result.DownloadedImages}/{result.TotalImages})");
+                var cookies = CookieJar.FromContainer(_cookies, new Uri("https://arca.live/"));
+                await _cookieJar.SaveAsync(cookies, _downloadCts.Token);
             }
+        }
+        catch (AuthenticationRequiredException ex)
+        {
+            AppendLog($"[ERROR] {ex.Message}");
+            SetLoginStatus("쿠키 갱신 필요");
+            await MessageBox.NotifyAsync(
+                "저장된 쿠키가 유효하지 않습니다. 수동 쿠키를 저장하거나 로그인을 다시 실행하세요.",
+                PromptIconKind.Warning,
+                owner: this);
         }
         catch (OperationCanceledException)
         {
@@ -584,52 +629,20 @@ internal sealed class MainWindow : Window
         }
     }
 
-    private async Task DownloadUrlWithLoginRetryAsync(string url, CancellationToken cancellationToken)
+    private async Task<string> FetchArticleHtmlWithWebViewAsync(Uri uri, CancellationToken cancellationToken)
     {
-        try
+        AppendLog("[*] WebView2 브라우저 세션으로 게시글을 엽니다.");
+        var window = new ArticleHtmlWebViewWindow(uri);
+        await window.ShowDialogAsync(this);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (string.IsNullOrWhiteSpace(window.Html))
         {
-            await DownloadUrlAsync(url, cancellationToken);
+            throw new InvalidOperationException(window.ErrorMessage ?? "WebView2에서 게시글 HTML을 가져오지 못했습니다.");
         }
-        catch (AuthenticationRequiredException ex)
-        {
-            AppendLog($"[WARN] {ex.Message}");
-            SetLoginStatus("쿠키 갱신 필요");
-            AppendLog("[*] 저장된 세션이 만료되어 로그인 창을 엽니다.");
 
-            await LoginAsync(this);
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var saved = CookieJar.FromContainer(_cookies, new Uri("https://arca.live/"));
-            if (saved.Count == 0)
-            {
-                throw;
-            }
-
-            AppendLog("[*] 새 로그인 세션으로 다운로드를 다시 시도합니다.");
-            await DownloadUrlAsync(url, cancellationToken);
-        }
-    }
-
-    private async Task DownloadUrlAsync(string url, CancellationToken cancellationToken)
-    {
-        var request = new DownloadRequest(
-            url,
-            _outputDirectory,
-            _cookieHeader,
-            _originalImageCheckBox.IsChecked == true,
-            _cleanupTempCheckBox.IsChecked == true);
-
-        var result = await _downloadService.DownloadAsync(
-            request,
-            _cookies,
-            _pauseGate,
-            new Progress<string>(AppendLog),
-            new Progress<DownloadProgress>(UpdateProgress),
-            cancellationToken);
-
-        AppendLog($"[DONE] {result.ZipPath} ({result.DownloadedImages}/{result.TotalImages})");
-        var cookies = CookieJar.FromContainer(_cookies, new Uri("https://arca.live/"));
-        await _cookieJar.SaveAsync(cookies, cancellationToken);
+        AppendLog("[*] WebView2에서 게시글 HTML을 가져왔습니다.");
+        return window.Html;
     }
 
     private void PauseOrResume()
@@ -783,6 +796,105 @@ internal sealed class AccountSessionStatusStore
     private static void Update(Action action)
     {
         Application.Current.Dispatcher!.BeginInvoke(action);
+    }
+}
+
+internal sealed class ArticleHtmlWebViewWindow : Window
+{
+    private readonly Uri _uri;
+    private readonly ObservableValue<string> _status = new("게시글을 여는 중...");
+    private readonly Aprillz.MewUI.Controls.WebView2 _browser = new()
+    {
+        UseSharedEnvironment = false,
+        UserDataFolder = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "ArcaDownloader",
+            "WebView2")
+    };
+
+    private bool _captureInProgress;
+
+    public ArticleHtmlWebViewWindow(Uri uri)
+    {
+        _uri = uri;
+        Title = "WebView2 게시글 가져오기";
+        StartupLocation = WindowStartupLocation.CenterOwner;
+        WindowSize = WindowSize.Resizable(960, 720, 720, 520);
+
+        Content = new DockPanel()
+            .Spacing(8)
+            .Padding(12)
+            .Children(
+                new DockPanel()
+                    .DockTop()
+                    .Spacing(8)
+                    .Children(
+                        new Button().Content("다시 시도").OnClick(() => Navigate()),
+                        new Button().Content("취소").DockRight().OnClick(Close),
+                        new TextBlock().BindText(_status).CenterVertical()),
+                _browser);
+
+        _browser.CoreWebView2InitializationCompleted += _ => Navigate();
+        _browser.NavigationCompleted += async e =>
+        {
+            if (!e.IsSuccess || e.HttpStatusCode is < 200 or >= 400)
+            {
+                ErrorMessage = $"WebView2 게시글 요청 실패: HTTP {e.HttpStatusCode}";
+                _status.Value = ErrorMessage;
+                return;
+            }
+
+            await CaptureHtmlAsync();
+        };
+    }
+
+    public string? Html { get; private set; }
+
+    public string? ErrorMessage { get; private set; }
+
+    private void Navigate()
+    {
+        Html = null;
+        ErrorMessage = null;
+        _status.Value = "게시글을 여는 중...";
+        _browser.Source = _uri;
+    }
+
+    private async Task CaptureHtmlAsync()
+    {
+        if (_captureInProgress)
+        {
+            return;
+        }
+
+        _captureInProgress = true;
+        try
+        {
+            _status.Value = "게시글 HTML을 읽는 중...";
+            await Task.Delay(500);
+            var result = await _browser.ExecuteScriptAsync("document.documentElement.outerHTML");
+            Html = string.IsNullOrWhiteSpace(result)
+                ? ""
+                : JsonSerializer.Deserialize(result, MewUiJsonContext.Default.String) ?? "";
+            if (string.IsNullOrWhiteSpace(Html))
+            {
+                ErrorMessage = "WebView2 스크립트 결과가 비어 있습니다.";
+                _status.Value = ErrorMessage;
+                return;
+            }
+
+            _status.Value = "게시글 HTML을 가져왔습니다.";
+            Close();
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"WebView2 HTML 읽기 실패: {ex.Message}";
+            _status.Value = ErrorMessage;
+        }
+        finally
+        {
+            _captureInProgress = false;
+        }
     }
 }
 
