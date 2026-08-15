@@ -176,11 +176,12 @@ static void WriteSessionCheckLines(IReadOnlyList<string> lines, string logPath)
 
 internal sealed class MainWindow : Window
 {
-    private readonly List<TextBox> _urlBoxes = [];
     private readonly CookieJar _cookieJar = CookieJar.Default();
     private readonly AppSettingsStore _settingsStore = AppSettingsStore.Default();
+    private readonly DownloadQueueStore _queueStore = new(Path.Combine(AppContext.BaseDirectory, "queue.json"));
     private readonly DownloadService _downloadService = new();
     private readonly AsyncPauseGate _pauseGate = new();
+    private readonly SemaphoreSlim _queueSaveGate = new(1, 1);
     private readonly ObservableValue<string> _loginStatus = new("미로그인");
     private readonly AccountSessionStatusStore _accountSessionStatus = new();
     private readonly ObservableValue<double> _totalProgress = new(0);
@@ -195,7 +196,11 @@ internal sealed class MainWindow : Window
     private string _cookieHeader = "";
     private string _outputDirectory = "";
     private CancellationTokenSource? _downloadCts;
-    private StackPanel _urlRows = null!;
+    private DownloadQueue _downloadQueue = new();
+    private Task? _queueTask;
+    private TextBox _urlInput = null!;
+    private StackPanel _queueRows = null!;
+    private TextBlock _queueSummaryText = null!;
     private MultiLineTextBox _logTextBox = null!;
     private CheckBox _originalImageCheckBox = null!;
     private CheckBox _cleanupTempCheckBox = null!;
@@ -203,6 +208,7 @@ internal sealed class MainWindow : Window
     private Button _startButton = null!;
     private Button _pauseButton = null!;
     private Button _stopButton = null!;
+    private Button _clearQueueButton = null!;
 
     public MainWindow()
     {
@@ -211,13 +217,17 @@ internal sealed class MainWindow : Window
         StartupLocation = WindowStartupLocation.CenterScreen;
         WindowSize = WindowSize.Resizable(780, 760, 640, 560);
         Content = BuildContent();
-        Loaded += async () => await InitializeSessionAsync();
+        PreviewKeyDown += HandlePreviewKeyDown;
+        Loaded += async () =>
+        {
+            await InitializeSessionAsync();
+            await LoadQueueAsync();
+        };
     }
 
     private Element BuildContent()
     {
-        _urlRows = new StackPanel().Vertical().Spacing(6);
-        AddUrlRow("");
+        _queueRows = new StackPanel().Vertical().Spacing(6);
 
         return new ScrollViewer()
             .VerticalScroll(ScrollMode.Auto)
@@ -228,7 +238,7 @@ internal sealed class MainWindow : Window
                     .Padding(28, 24)
                     .Children(
                         Header(),
-                        Section("URL 목록", UrlSection()),
+                        Section("다운로드 큐", UrlSection()),
                         Section("다운로드 설정", SettingsSection()),
                         ActionButtons(),
                         ProgressSection(),
@@ -274,44 +284,33 @@ internal sealed class MainWindow : Window
 
     private UIElement UrlSection()
     {
+        _urlInput = new TextBox()
+            .Placeholder("게시글 URL을 입력한 뒤 추가");
+        var addButton = new Button()
+            .Content("추가")
+            .OnClick(async () => await AddManualUrlAsync());
+        _clearQueueButton = new Button()
+            .Content("큐 비우기")
+            .OnClick(async () => await ClearQueueAsync());
+        _queueSummaryText = new TextBlock()
+            .Text("큐가 비어 있습니다.")
+            .CenterVertical();
+
         return new StackPanel()
             .Vertical()
             .Spacing(8)
             .Children(
                 new DockPanel()
+                    .Spacing(8)
                     .Children(
-                        new Button()
-                            .DockRight()
-                            .Content("URL 추가")
-                            .OnClick(() => AddUrlRow("")),
-                        new TextBlock().Text("다운로드할 게시글 URL을 입력하세요").CenterVertical()),
-                _urlRows);
-    }
-
-    private void AddUrlRow(string value)
-    {
-        var box = new TextBox { Text = value };
-        DockPanel row = null!;
-        row = new DockPanel()
-            .Spacing(8)
-            .Children(
-                new Button()
-                    .DockRight()
-                    .Content("삭제")
-                    .OnClick(() =>
-                    {
-                        if (_urlBoxes.Count <= 1)
-                        {
-                            return;
-                        }
-
-                        _urlBoxes.Remove(box);
-                        _urlRows.Remove(row);
-                    }),
-                box);
-
-        _urlBoxes.Add(box);
-        _urlRows.Add(row);
+                        addButton.DockRight(),
+                        _urlInput),
+                new DockPanel()
+                    .Spacing(8)
+                    .Children(
+                        _clearQueueButton.DockRight(),
+                        _queueSummaryText),
+                _queueRows);
     }
 
     private UIElement SettingsSection()
@@ -373,6 +372,232 @@ internal sealed class MainWindow : Window
             .FontFamily("Consolas");
         _logTextBox.IsReadOnly = true;
         return _logTextBox;
+    }
+
+    private async Task LoadQueueAsync()
+    {
+        try
+        {
+            var entries = await _queueStore.LoadAsync();
+            _downloadQueue = new DownloadQueue(entries);
+            RefreshQueueRows();
+
+            var pendingCount = _downloadQueue.Items.Count(item => item.Status == DownloadQueueItemStatus.Pending);
+            if (pendingCount > 0)
+            {
+                AppendLog($"[*] 저장된 큐 {pendingCount}건을 복원했습니다.");
+                EnsureQueueRunning();
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            AppendLog($"[WARN] 다운로드 큐 복원 실패: {ex.Message}");
+            RefreshQueueRows();
+        }
+    }
+
+    private async Task AddManualUrlAsync()
+    {
+        var value = _urlInput.Text ?? "";
+        if (!UrlInputParser.TryGetHttpUrl(value, out var url, out _))
+        {
+            await MessageBox.NotifyAsync("유효한 http 또는 https URL을 입력하세요.", PromptIconKind.Info, owner: this);
+            return;
+        }
+
+        var added = await AddUrlsAsync([url]);
+        if (added > 0)
+        {
+            _urlInput.Text = "";
+        }
+    }
+
+    private async Task<int> AddUrlsAsync(IReadOnlyList<string> urls)
+    {
+        var validUrls = urls
+            .Where(url => UrlInputParser.TryGetHttpUrl(url, out _, out _))
+            .ToList();
+        if (validUrls.Count == 0)
+        {
+            return 0;
+        }
+
+        var duplicates = _downloadQueue.FindDuplicates(validUrls);
+        var includeDuplicates = false;
+        if (duplicates.Count > 0)
+        {
+            var preview = string.Join(Environment.NewLine, duplicates.Take(5));
+            if (duplicates.Count > 5)
+            {
+                preview += Environment.NewLine + $"외 {duplicates.Count - 5}건";
+            }
+
+            includeDuplicates = MessageBox.AskYesNo(
+                $"이미 큐에 있거나 이번 입력에서 반복된 URL {duplicates.Count}건입니다.\n\n{preview}\n\n중복을 포함해 모두 추가할까요?",
+                PromptIconKind.Question,
+                owner: this);
+        }
+
+        var added = _downloadQueue.Add(validUrls, includeDuplicates);
+        if (added.Count == 0)
+        {
+            AppendLog("[*] 새로 추가된 큐 항목이 없습니다.");
+            RefreshQueueRows();
+            return 0;
+        }
+
+        await SaveQueueAsync();
+        RefreshQueueRows();
+        AppendLog($"[*] 큐에 {added.Count}건을 추가했습니다.");
+        EnsureQueueRunning();
+        return added.Count;
+    }
+
+    private async Task HandlePastedUrlsAsync(IReadOnlyList<string> urls)
+    {
+        try
+        {
+            await AddUrlsAsync(urls);
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"[ERROR] 붙여넣은 URL 추가 실패: {ex.Message}");
+        }
+    }
+
+    private void HandlePreviewKeyDown(KeyEventArgs e)
+    {
+        var isPaste = (e.PrimaryKey && e.Key == Key.V)
+                      || (e.ShiftKey && e.Key == Key.Insert);
+        if (!isPaste || !NativeClipboard.TryGetText(out var clipboardText))
+        {
+            return;
+        }
+
+        var urls = UrlInputParser.ExtractHttpUrls(clipboardText);
+        if (urls.Count == 0)
+        {
+            return;
+        }
+
+        e.Handled = true;
+        _ = HandlePastedUrlsAsync(urls);
+    }
+
+    private async Task RetryQueueItemAsync(DownloadQueueItem item)
+    {
+        _downloadQueue.Retry(item);
+        await SaveQueueAsync();
+        RefreshQueueRows();
+        EnsureQueueRunning();
+    }
+
+    private async Task RemoveQueueItemAsync(DownloadQueueItem item)
+    {
+        try
+        {
+            _downloadQueue.Remove(item);
+            await SaveQueueAsync();
+            RefreshQueueRows();
+        }
+        catch (InvalidOperationException ex)
+        {
+            AppendLog($"[WARN] 큐 항목 삭제 실패: {ex.Message}");
+        }
+    }
+
+    private async Task ClearQueueAsync()
+    {
+        if (!_downloadQueue.Items.Any(item => item.Status != DownloadQueueItemStatus.Downloading))
+        {
+            return;
+        }
+
+        if (!MessageBox.AskYesNo("대기 중이거나 실패한 큐 항목을 모두 삭제할까요?", PromptIconKind.Question, owner: this))
+        {
+            return;
+        }
+
+        _downloadQueue.ClearWaiting();
+        await SaveQueueAsync();
+        RefreshQueueRows();
+    }
+
+    private void RefreshQueueRows()
+    {
+        _queueRows.Clear();
+        if (_downloadQueue.Items.Count == 0)
+        {
+            _queueRows.Add(new TextBlock().Text("큐가 비어 있습니다.").FontSize(12));
+        }
+        else
+        {
+            foreach (var item in _downloadQueue.Items)
+            {
+                _queueRows.Add(BuildQueueRow(item));
+            }
+        }
+
+        var pending = _downloadQueue.Items.Count(item => item.Status == DownloadQueueItemStatus.Pending);
+        var active = _downloadQueue.Items.Count(item => item.Status == DownloadQueueItemStatus.Downloading);
+        var failed = _downloadQueue.Items.Count(item => item.Status == DownloadQueueItemStatus.Failed);
+        _queueSummaryText.Text = $"대기 {pending} / 진행 {active} / 실패 {failed}";
+        _clearQueueButton.IsEnabled = pending > 0 || failed > 0;
+    }
+
+    private UIElement BuildQueueRow(DownloadQueueItem item)
+    {
+        var actions = new StackPanel()
+            .Horizontal()
+            .Spacing(4);
+
+        if (item.Status == DownloadQueueItemStatus.Failed)
+        {
+            actions.Add(new Button()
+                .Content("재시도")
+                .OnClick(async () => await RetryQueueItemAsync(item)));
+        }
+
+        if (item.Status != DownloadQueueItemStatus.Downloading)
+        {
+            actions.Add(new Button()
+                .Content("삭제")
+                .OnClick(async () => await RemoveQueueItemAsync(item)));
+        }
+
+        var status = item.Status switch
+        {
+            DownloadQueueItemStatus.Pending => "대기",
+            DownloadQueueItemStatus.Downloading => "다운로드 중",
+            DownloadQueueItemStatus.Failed => "실패",
+            _ => "알 수 없음"
+        };
+        var detail = string.IsNullOrWhiteSpace(item.ErrorMessage)
+            ? item.Url
+            : $"{item.Url} ({item.ErrorMessage})";
+
+        return new DockPanel()
+            .Spacing(8)
+            .Children(
+                actions.DockRight(),
+                new TextBlock().Text($"[{status}] {detail}").CenterVertical());
+    }
+
+    private async Task SaveQueueAsync()
+    {
+        await _queueSaveGate.WaitAsync();
+        try
+        {
+            await _queueStore.SaveAsync(_downloadQueue.Items);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            AppendLog($"[WARN] 다운로드 큐 저장 실패: {ex.Message}");
+        }
+        finally
+        {
+            _queueSaveGate.Release();
+        }
     }
 
     private async Task LoadCookiesAsync()
@@ -568,63 +793,122 @@ internal sealed class MainWindow : Window
 
     private async Task StartAsync()
     {
-        var urls = _urlBoxes.Select(box => (box.Text ?? "").Trim()).Where(text => text.Length > 0).ToList();
-        if (urls.Count == 0)
+        if (!_downloadQueue.Items.Any(item => item.Status == DownloadQueueItemStatus.Pending))
         {
-            await MessageBox.NotifyAsync("URL을 입력하세요.", PromptIconKind.Info, owner: this);
+            await MessageBox.NotifyAsync("대기 중인 URL이 없습니다.", PromptIconKind.Info, owner: this);
             return;
         }
 
-        _downloadCts = new CancellationTokenSource();
+        EnsureQueueRunning();
+    }
+
+    private void EnsureQueueRunning()
+    {
+        if (_queueTask is { IsCompleted: false })
+        {
+            return;
+        }
+
+        if (!_downloadQueue.Items.Any(item => item.Status == DownloadQueueItemStatus.Pending))
+        {
+            SetDownloading(false);
+            return;
+        }
+
+        _queueTask = RunQueueAsync();
+    }
+
+    private async Task RunQueueAsync()
+    {
+        using var downloadCts = new CancellationTokenSource();
+        _downloadCts = downloadCts;
         _pauseGate.Resume();
         SetDownloading(true);
-        await SaveSettingsAsync();
-        _cookies = await _cookieJar.LoadAsync();
 
         try
         {
-            foreach (var url in urls)
+            await SaveSettingsAsync();
+            _cookies = await _cookieJar.LoadAsync();
+
+            while (_downloadQueue.TryTakeNextPending(out var item))
             {
-                var request = new DownloadRequest(
-                    url,
-                    _outputDirectory,
-                    _cookieHeader,
-                    _originalImageCheckBox.IsChecked == true,
-                    _cleanupTempCheckBox.IsChecked == true);
+                await SaveQueueAsync();
+                RefreshQueueRows();
 
-                var result = await _downloadService.DownloadAsync(
-                    request,
-                    _cookies,
-                    _pauseGate,
-                    new Progress<string>(AppendLog),
-                    new Progress<DownloadProgress>(UpdateProgress),
-                    FetchArticleHtmlWithWebViewAsync,
-                    _downloadCts.Token);
+                try
+                {
+                    var request = new DownloadRequest(
+                        item.Url,
+                        _outputDirectory,
+                        _cookieHeader,
+                        _originalImageCheckBox.IsChecked == true,
+                        _cleanupTempCheckBox.IsChecked == true);
 
-                AppendLog($"[DONE] {result.ZipPath} ({result.DownloadedImages}/{result.TotalImages})");
-                var cookies = CookieJar.FromContainer(_cookies, new Uri("https://arca.live/"));
-                await _cookieJar.SaveAsync(cookies, _downloadCts.Token);
+                    var result = await _downloadService.DownloadAsync(
+                        request,
+                        _cookies,
+                        _pauseGate,
+                        new Progress<string>(AppendLog),
+                        new Progress<DownloadProgress>(UpdateProgress),
+                        FetchArticleHtmlWithWebViewAsync,
+                        downloadCts.Token);
+
+                    AppendLog($"[DONE] {result.ZipPath} ({result.DownloadedImages}/{result.TotalImages})");
+                    _downloadQueue.MarkCompleted(item);
+                    await SaveQueueAsync();
+                    RefreshQueueRows();
+
+                    try
+                    {
+                        var cookies = CookieJar.FromContainer(_cookies, new Uri("https://arca.live/"));
+                        await _cookieJar.SaveAsync(cookies, downloadCts.Token);
+                    }
+                    catch (OperationCanceledException) when (downloadCts.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        AppendLog($"[WARN] 세션 쿠키 저장 실패: {ex.Message}");
+                    }
+                }
+                catch (AuthenticationRequiredException ex)
+                {
+                    _downloadQueue.MarkPending(item);
+                    await SaveQueueAsync();
+                    RefreshQueueRows();
+                    AppendLog($"[ERROR] {ex.Message}");
+                    SetLoginStatus("쿠키 갱신 필요");
+                    await MessageBox.NotifyAsync(
+                        "저장된 쿠키가 유효하지 않습니다. 수동 쿠키를 저장하거나 로그인을 다시 실행하세요.",
+                        PromptIconKind.Warning,
+                        owner: this);
+                    break;
+                }
+                catch (OperationCanceledException)
+                {
+                    _downloadQueue.MarkPending(item);
+                    await SaveQueueAsync();
+                    RefreshQueueRows();
+                    AppendLog("[ERROR] 사용자가 다운로드를 중지했습니다.");
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _downloadQueue.MarkFailed(item, ex.Message);
+                    await SaveQueueAsync();
+                    RefreshQueueRows();
+                    AppendLog($"[ERROR] {item.Url}: {ex.Message}");
+                }
             }
         }
-        catch (AuthenticationRequiredException ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            AppendLog($"[ERROR] {ex.Message}");
-            SetLoginStatus("쿠키 갱신 필요");
-            await MessageBox.NotifyAsync(
-                "저장된 쿠키가 유효하지 않습니다. 수동 쿠키를 저장하거나 로그인을 다시 실행하세요.",
-                PromptIconKind.Warning,
-                owner: this);
-        }
-        catch (OperationCanceledException)
-        {
-            AppendLog("[ERROR] 사용자가 다운로드를 중지했습니다.");
-        }
-        catch (Exception ex)
-        {
-            AppendLog($"[ERROR] {ex.Message}");
+            AppendLog($"[ERROR] 큐 실행 준비 실패: {ex.Message}");
         }
         finally
         {
+            _downloadCts = null;
             SetDownloading(false);
         }
     }
@@ -1359,10 +1643,70 @@ internal sealed record AppSettings(string? OutputDirectory);
 internal static partial class NativeMethods
 {
     public const uint AttachParentProcess = 0xFFFFFFFF;
+    public const uint ClipboardUnicodeText = 13;
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool AttachConsole(uint processId);
+
+    [LibraryImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool OpenClipboard(IntPtr windowHandle);
+
+    [LibraryImport("user32.dll")]
+    public static partial IntPtr GetClipboardData(uint format);
+
+    [LibraryImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool CloseClipboard();
+
+    [LibraryImport("kernel32.dll")]
+    public static partial IntPtr GlobalLock(IntPtr handle);
+
+    [LibraryImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool GlobalUnlock(IntPtr handle);
+}
+
+internal static class NativeClipboard
+{
+    public static bool TryGetText(out string text)
+    {
+        text = "";
+        if (!NativeMethods.OpenClipboard(IntPtr.Zero))
+        {
+            return false;
+        }
+
+        IntPtr handle = IntPtr.Zero;
+        IntPtr pointer = IntPtr.Zero;
+        try
+        {
+            handle = NativeMethods.GetClipboardData(NativeMethods.ClipboardUnicodeText);
+            if (handle == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            pointer = NativeMethods.GlobalLock(handle);
+            if (pointer == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            text = Marshal.PtrToStringUni(pointer) ?? "";
+            return true;
+        }
+        finally
+        {
+            if (pointer != IntPtr.Zero)
+            {
+                NativeMethods.GlobalUnlock(handle);
+            }
+
+            NativeMethods.CloseClipboard();
+        }
+    }
 }
 
 internal static class FluentHelpers
