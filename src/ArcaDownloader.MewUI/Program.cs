@@ -10,6 +10,7 @@ using ArcaDownloader.Core.Auth;
 using ArcaDownloader.Core.Download;
 using ArcaDownloader.Core.Models;
 using ArcaDownloader.Core.Services;
+using ArcaDownloader.Core.Settings;
 using DirectN;
 using WebView2;
 using WebView2.Utilities;
@@ -195,6 +196,8 @@ internal sealed class MainWindow : Window
     private CookieContainer _cookies = new();
     private string _cookieHeader = "";
     private string _outputDirectory = "";
+    private bool _downloadOriginal = true;
+    private bool _cleanupTempOnSuccess = false;
     private CancellationTokenSource? _downloadCts;
     private DownloadQueue _downloadQueue = new();
     private Task? _queueTask;
@@ -202,8 +205,6 @@ internal sealed class MainWindow : Window
     private StackPanel _queueRows = null!;
     private TextBlock _queueSummaryText = null!;
     private MultiLineTextBox _logTextBox = null!;
-    private CheckBox _originalImageCheckBox = null!;
-    private CheckBox _cleanupTempCheckBox = null!;
     private Button _settingsButton = null!;
     private Button _startButton = null!;
     private Button _pauseButton = null!;
@@ -239,7 +240,6 @@ internal sealed class MainWindow : Window
                     .Children(
                         Header(),
                         Section("다운로드 큐", UrlSection()),
-                        Section("다운로드 설정", SettingsSection()),
                         ActionButtons(),
                         ProgressSection(),
                         LogSection()));
@@ -311,18 +311,6 @@ internal sealed class MainWindow : Window
                         _clearQueueButton.DockRight(),
                         _queueSummaryText),
                 _queueRows);
-    }
-
-    private UIElement SettingsSection()
-    {
-        _originalImageCheckBox = new CheckBox().Content("이미지 원본 다운로드 (체크 해제 시 미리보기 화질로 다운로드)").IsChecked(true);
-        _cleanupTempCheckBox = new CheckBox().Content("완료된 임시 다운로드 삭제 (.arca_tmp)").IsChecked(false);
-        return new StackPanel()
-            .Vertical()
-            .Spacing(8)
-            .Children(
-                _originalImageCheckBox,
-                _cleanupTempCheckBox);
     }
 
     private Element ActionButtons()
@@ -617,6 +605,8 @@ internal sealed class MainWindow : Window
         _outputDirectory = string.IsNullOrWhiteSpace(settings.OutputDirectory)
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads")
             : settings.OutputDirectory;
+        _downloadOriginal = settings.DownloadOriginal;
+        _cleanupTempOnSuccess = settings.CleanupTempOnSuccess;
         await SaveSettingsAsync();
     }
 
@@ -660,6 +650,8 @@ internal sealed class MainWindow : Window
         var settingsWindow = new SettingsWindow(
             _cookieHeader,
             _outputDirectory,
+            _downloadOriginal,
+            _cleanupTempOnSuccess,
             _loginStatus,
             _accountSessionStatus,
             LoginAsync,
@@ -675,6 +667,8 @@ internal sealed class MainWindow : Window
         await settingsWindow.ShowDialogAsync(this);
         _cookieHeader = settingsWindow.CookieHeader;
         _outputDirectory = settingsWindow.OutputDirectory;
+        _downloadOriginal = settingsWindow.DownloadOriginal;
+        _cleanupTempOnSuccess = settingsWindow.CleanupTempOnSuccess;
         await SaveSettingsAsync();
     }
 
@@ -704,7 +698,7 @@ internal sealed class MainWindow : Window
     {
         try
         {
-            await _settingsStore.SaveAsync(new AppSettings(_outputDirectory));
+            await _settingsStore.SaveAsync(new AppSettings(_outputDirectory, _downloadOriginal, _cleanupTempOnSuccess));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -841,8 +835,8 @@ internal sealed class MainWindow : Window
                         item.Url,
                         _outputDirectory,
                         _cookieHeader,
-                        _originalImageCheckBox.IsChecked == true,
-                        _cleanupTempCheckBox.IsChecked == true);
+                        _downloadOriginal,
+                        _cleanupTempOnSuccess);
 
                     var result = await _downloadService.DownloadAsync(
                         request,
@@ -1186,10 +1180,14 @@ internal sealed class SettingsWindow : Window
 {
     private readonly TextBox _cookieTextBox;
     private readonly TextBox _outputDirectoryTextBox;
+    private readonly CheckBox _originalImageCheckBox;
+    private readonly CheckBox _cleanupTempCheckBox;
 
     public SettingsWindow(
         string cookieHeader,
         string outputDirectory,
+        bool downloadOriginal,
+        bool cleanupTempOnSuccess,
         ObservableValue<string> loginStatus,
         AccountSessionStatusStore accountSessionStatus,
         Func<Window, Task> loginAsync,
@@ -1200,7 +1198,7 @@ internal sealed class SettingsWindow : Window
     {
         Title = "설정";
         StartupLocation = WindowStartupLocation.CenterOwner;
-        WindowSize = WindowSize.Fixed(620, 430);
+        WindowSize = WindowSize.Fixed(620, 520);
 
         _cookieTextBox = new TextBox
         {
@@ -1210,6 +1208,12 @@ internal sealed class SettingsWindow : Window
         {
             Text = outputDirectory
         };
+        _originalImageCheckBox = new CheckBox()
+            .Content("이미지 원본 다운로드 (체크 해제 시 미리보기 화질로 다운로드)")
+            .IsChecked(downloadOriginal);
+        _cleanupTempCheckBox = new CheckBox()
+            .Content("완료된 임시 다운로드 삭제 (.arca_tmp)")
+            .IsChecked(cleanupTempOnSuccess);
 
         Content = new StackPanel()
             .Vertical()
@@ -1217,6 +1221,7 @@ internal sealed class SettingsWindow : Window
             .Padding(24)
             .Children(
                 Section("저장 위치", OutputSection(saveOutputDirectoryAsync)),
+                Section("다운로드 설정", DownloadSection()),
                 Section("계정 관리", AccountSection(loginStatus, accountSessionStatus, loginAsync, saveCookieAsync, clearCookieAsync, testSessionAsync)),
                 new DockPanel()
                     .Children(
@@ -1229,6 +1234,20 @@ internal sealed class SettingsWindow : Window
     public string CookieHeader => _cookieTextBox.Text ?? "";
 
     public string OutputDirectory => _outputDirectoryTextBox.Text ?? "";
+
+    public bool DownloadOriginal => _originalImageCheckBox.IsChecked == true;
+
+    public bool CleanupTempOnSuccess => _cleanupTempCheckBox.IsChecked == true;
+
+    private UIElement DownloadSection()
+    {
+        return new StackPanel()
+            .Vertical()
+            .Spacing(8)
+            .Children(
+                _originalImageCheckBox,
+                _cleanupTempCheckBox);
+    }
 
     private UIElement OutputSection(Func<string, Task> saveOutputDirectoryAsync)
     {
@@ -1559,86 +1578,6 @@ internal sealed class LoginWindow : Window
         return value.ToStringAndDispose() ?? "";
     }
 }
-
-internal sealed class AppSettingsStore
-{
-    private const string Section = "[General]";
-    private const string OutputDirectoryKey = "OutputDirectory";
-
-    private AppSettingsStore(string path)
-    {
-        Path = path;
-    }
-
-    public string Path { get; }
-
-    public static AppSettingsStore Default()
-    {
-        return new AppSettingsStore(System.IO.Path.Combine(AppContext.BaseDirectory, "settings.ini"));
-    }
-
-    public async Task<AppSettings> LoadAsync(CancellationToken cancellationToken = default)
-    {
-        if (!File.Exists(Path))
-        {
-            return new AppSettings(null);
-        }
-
-        var lines = await File.ReadAllLinesAsync(Path, Encoding.UTF8, cancellationToken);
-        var inGeneral = false;
-        string? outputDirectory = null;
-
-        foreach (var rawLine in lines)
-        {
-            var line = rawLine.Trim();
-            if (line.Length == 0 || line.StartsWith(';') || line.StartsWith('#'))
-            {
-                continue;
-            }
-
-            if (line.StartsWith('[') && line.EndsWith(']'))
-            {
-                inGeneral = line.Equals(Section, StringComparison.OrdinalIgnoreCase);
-                continue;
-            }
-
-            if (!inGeneral)
-            {
-                continue;
-            }
-
-            var separator = line.IndexOf('=');
-            if (separator < 0)
-            {
-                continue;
-            }
-
-            var key = line[..separator].Trim();
-            var value = line[(separator + 1)..].Trim();
-            if (key.Equals(OutputDirectoryKey, StringComparison.OrdinalIgnoreCase))
-            {
-                outputDirectory = value;
-            }
-        }
-
-        return new AppSettings(string.IsNullOrWhiteSpace(outputDirectory) ? null : outputDirectory);
-    }
-
-    public async Task SaveAsync(AppSettings settings, CancellationToken cancellationToken = default)
-    {
-        var dir = System.IO.Path.GetDirectoryName(Path);
-        if (!string.IsNullOrEmpty(dir))
-        {
-            Directory.CreateDirectory(dir);
-        }
-
-        var outputDirectory = (settings.OutputDirectory ?? "").ReplaceLineEndings("").Trim();
-        var content = $"{Section}{Environment.NewLine}{OutputDirectoryKey}={outputDirectory}{Environment.NewLine}";
-        await File.WriteAllTextAsync(Path, content, Encoding.UTF8, cancellationToken);
-    }
-}
-
-internal sealed record AppSettings(string? OutputDirectory);
 
 internal static partial class NativeMethods
 {
